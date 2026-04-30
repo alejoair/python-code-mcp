@@ -1,0 +1,18 @@
+[project]
+name = "python-code-mcp"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp==3.2.4",
+    "ty==0.0.33",
+]
+
+[project.scripts]
+python-code-mcp = "ty_lsp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ty_lsp"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
