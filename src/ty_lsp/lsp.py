@@ -161,6 +161,104 @@ class TyServer:
             return None
         return result
 
+    async def diagnostic(self, file_uri: str) -> list[dict]:
+        """Solicita diagnósticos (type check) para un archivo.
+
+        Usa el modelo pull: textDocument/diagnostic.
+
+        Args:
+            file_uri: URI del archivo.
+
+        Returns:
+            Lista de diagnósticos (puede estar vacía).
+        """
+        resp = await self.send_and_wait("textDocument/diagnostic", {
+            "textDocument": {"uri": file_uri},
+        })
+
+        result = resp.get("result")
+        if result is None:
+            return []
+        # El resultado puede ser RelatedFullDocumentDiagnosticReport o similar
+        items = result.get("items", [])
+        return items
+
+    async def definition(
+        self, file_uri: str, line: int, character: int
+    ) -> list[dict]:
+        """Salta a la definición de un símbolo.
+
+        Args:
+            file_uri: URI del archivo.
+            line: Línea (0-indexed).
+            character: Columna (0-indexed).
+
+        Returns:
+            Lista de locaciones (each with uri, range).
+        """
+        resp = await self.send_and_wait("textDocument/definition", {
+            "textDocument": {"uri": file_uri},
+            "position": {"line": line, "character": character},
+        })
+
+        result = resp.get("result")
+        if result is None:
+            return []
+        # result puede ser un Location[] o LocationLink[]
+        if isinstance(result, list):
+            return result
+        # LocationLink (raro, pero defensivo)
+        return [result]
+
+    async def references(
+        self, file_uri: str, line: int, character: int
+    ) -> list[dict]:
+        """Busca todas las referencias a un símbolo.
+
+        Args:
+            file_uri: URI del archivo.
+            line: Línea (0-indexed).
+            character: Columna (0-indexed).
+
+        Returns:
+            Lista de locaciones con referencias.
+        """
+        resp = await self.send_and_wait("textDocument/references", {
+            "textDocument": {"uri": file_uri},
+            "position": {"line": line, "character": character},
+            "context": {"includeDeclaration": True},
+        })
+
+        result = resp.get("result")
+        if result is None:
+            return []
+        return result
+
+    async def rename(
+        self, file_uri: str, line: int, character: int, new_name: str
+    ) -> dict | None:
+        """Renombra un símbolo en todo el workspace.
+
+        Args:
+            file_uri: URI del archivo.
+            line: Línea (0-indexed).
+            character: Columna (0-indexed).
+            new_name: Nuevo nombre para el símbolo.
+
+        Returns:
+            WorkspaceEdit con los cambios, o None si no se pudo renombrar.
+        """
+        resp = await self.send_and_wait("textDocument/rename", {
+            "textDocument": {"uri": file_uri},
+            "position": {"line": line, "character": character},
+            "newName": new_name,
+        })
+
+        result = resp.get("result")
+        if result is None:
+            return None
+        return result
+
     async def stop(self) -> None:
         """Detiene el servidor ty."""
         if self.process:

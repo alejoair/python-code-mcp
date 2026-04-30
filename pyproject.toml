@@ -10,6 +10,9 @@ dependencies = [
 [project.scripts]
 python-code-mcp = "ty_lsp.server:main"
 
+[tool.ty.environment]
+extra-paths = ["C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\site-packages"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ty_lsp"]
 
