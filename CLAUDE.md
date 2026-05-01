@@ -125,12 +125,42 @@ python-code-mcp = "ty_lsp.server:main"
 
 Un solo entry point. `main()` revisa `sys.argv[1]` para decidir si instala o arranca el servidor.
 
+### Funciones auxiliares (`server.py`)
+
+| Función | Descripción |
+|---|---|
+| `_parse_gitignore(root)` | Parsea `.gitignore` y retorna lista de `(pattern, is_negation)` |
+| `_is_ignored(rel_path, patterns)` | Determina si un path relativo es ignorado por gitignore |
+| `_open_project_files(ty, root)` | Abre todos los `.py` del proyecto en ty (respeta `.gitignore`) |
+| `_ensure_file_open(ctx, file_path)` | Valida path y asegura que ty tenga el archivo abierto via didOpen |
+| `_format_location(loc)` | Formatea una `Location` LSP (uri + range) como texto legible |
+
+### Tools MCP expuestas
+
+| Tool | Parámetros | Descripción |
+|---|---|---|
+| `hover` | `file_path`, `line`, `character` | Info de tipo inferido para un símbolo |
+| `type_check` | `file_path` | Diagnósticos de tipo para un archivo |
+| `find_definition` | `file_path`, `line`, `col` | Ubicación de la definición de un símbolo |
+| `find_references` | `file_path`, `line`, `col` | Todas las referencias a un símbolo en el workspace |
+| `rename_symbol` | `file_path`, `line`, `col`, `new_name` | Renombrar símbolo en todo el workspace (aplica cambios en disco) |
+
+### Lifespan
+
+El lifespan `ty_lifespan` ejecuta al inicio:
+
+1. Crea un `TyServer`, lo inicia y lo inicializa con el `rootUri` del `cwd`
+2. Precarga todos los archivos `.py` del proyecto via `didOpen` (respeta `.gitignore`)
+3. Yield de `{"ty": TyServer, "open_files": set[str]}`
+4. Al shutdown: detiene el subprocess de ty
+
 ### Flujo: `server.py` → `lsp.py`
 
 1. `main()` → `mcp.run(transport="stdio")` arranca FastMCP
-2. El lifespan `ty_lifespan` crea un `TyServer`, lo inicia y lo inicializa
-3. Las tools (ej: `hover`) acceden al `TyServer` vía `ctx.lifespan_context["ty"]`
-4. `TyServer` maneja toda la comunicación LSP con ty via subprocess (stdin/stdout)
+2. El lifespan `ty_lifespan` crea un `TyServer`, lo inicia, lo inicializa y precarga los `.py`
+3. Las tools usan `_ensure_file_open()` para validar el path y abrir archivos bajo demanda
+4. Las tools acceden al `TyServer` vía `ctx.lifespan_context["ty"]`
+5. `TyServer` maneja toda la comunicación LSP con ty via subprocess (stdin/stdout)
 
 ## TyServer — Cliente LSP para ty
 
@@ -140,13 +170,22 @@ Un solo entry point. `main()` revisa `sys.argv[1]` para decidir si instala o arr
 
 - **Transporte:** stdio (stdin/stdout) con framing LSP (`Content-Length`)
 - **Protocolo:** JSON-RPC 2.0
-- **Métodos clave:**
+- **Métodos de bajo nivel:**
   - `start()` — lanza `ty server` como subprocess
+  - `send(message)` — envía mensaje JSON-RPC con framing LSP
   - `send_request(method, params)` — envía request, retorna ID
   - `send_notification(method, params)` — envía notificación (sin respuesta)
-  - `send_and_wait(method, params)` — envía request y lee hasta obtener la respuesta con el ID correcto (descarta notificaciones entremedio)
+  - `send_and_wait(method, params, timeout=10.0)` — envía request y lee hasta obtener la respuesta con el ID correcto (descarta notificaciones entremedio)
   - `read_message()` — lee un mensaje con framing `Content-Length`
   - `stop()` — termina el subprocess
+- **Métodos de alto nivel (LSP):**
+  - `initialize(root_uri)` — handshake LSP: `initialize` request + `initialized` notificación
+  - `open_file(file_uri, content, version=1)` — notificación `textDocument/didOpen`
+  - `hover(file_uri, line, character)` → `dict | None` — `textDocument/hover`
+  - `diagnostic(file_uri)` → `list[dict]` — `textDocument/diagnostic` (pull model)
+  - `definition(file_uri, line, character)` → `list[dict]` — `textDocument/definition`
+  - `references(file_uri, line, character)` → `list[dict]` — `textDocument/references`
+  - `rename(file_uri, line, character, new_name)` → `dict | None` — `textDocument/rename`
 
 ### Flujo LSP: didOpen → hover
 
@@ -543,8 +582,8 @@ mcp.mount(child_server, namespace="api")
 - **Home**: `C:\Users\user`
 - **Shell**: `C:\WINDOWS\system32\cmd.exe`
 - **Python**: `3.14.2` → `C:\Python314\python.exe`
-- **Date/Time**: 2026-04-29 21:35:48 (SA Pacific Standard Time)
-- **Unix Timestamp**: `1777516548`
+- **Date/Time**: 2026-05-01 07:59:37 (SA Pacific Standard Time)
+- **Unix Timestamp**: `1777640377`
 
 
 
@@ -3823,21 +3862,16 @@ python-code/
 ### Git Info
 
 - **Branch**: `main`
-  - c0a942f Fix: install python build module instead of only hatchling
-  - ee6ff39 Initial commit: python-code-mcp server with ty LSP integration
+  - a5c8339 Bump version to 0.2.1
+  - 225fe61 Bump minimum Python version to 3.12
+  - f58e96f Bump version to 0.2.0
 
 ### Git Status
 
 ```
   M CLAUDE.md
-   M pyproject.toml
-   M sample.py
-   M src/ty_lsp/lsp.py
    M src/ty_lsp/server.py
-  ?? Python314Libsite-packages/
-  ?? SYSTEM_PROMPT.md
-  ?? src/ty_lsp/install.py
-  ?? src/ty_lsp/testmod/
+   M src/ty_lsp/testmod/service.py
 ```
 
 ---
