@@ -5,14 +5,21 @@ Usa FastMCP con transporte stdio. El servidor ty se maneja internamente
 como subprocess via lifespan.
 """
 
+import ast
 import fnmatch
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastmcp import FastMCP, Context  # type: ignore[import-unresolved]
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from ty_lsp.lsp import TyServer
+
+# Estado global accesible por las rutas HTTP custom
+_ty_server: TyServer | None = None
+_open_files: set[str] = set()
 
 
 class FileError(Exception):
@@ -124,6 +131,8 @@ async def _ensure_file_open(ctx: Context, file_path: str) -> str:
 @asynccontextmanager
 async def ty_lifespan(server: FastMCP):
     """Lifespan que inicia y detiene ty server como subprocess."""
+    global _ty_server, _open_files
+
     root_path = Path.cwd()
     root_uri = root_path.as_uri()
 
@@ -133,9 +142,14 @@ async def ty_lifespan(server: FastMCP):
 
     open_files = await _open_project_files(ty, root_path)
 
+    _ty_server = ty
+    _open_files = open_files
+
     yield {"ty": ty, "open_files": open_files}
 
     await ty.stop()
+    _ty_server = None
+    _open_files = set()
 
 
 mcp = FastMCP(
@@ -328,6 +342,94 @@ async def find_references(
 
 # rename_symbol desactivada — el rename de ty no es confiable (rename textual, no semántico).
 # Puede corromper archivos que no tienen relación con el símbolo renombrado.
+
+
+def _extract_symbols(source: str) -> list[dict]:
+    """Extrae clases y funciones de un archivo Python usando ast (2 niveles)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    symbols: list[dict] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            symbols.append({"kind": "class", "name": node.name, "line": node.lineno, "depth": 0})
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    kind = "async def" if isinstance(child, ast.AsyncFunctionDef) else "def"
+                    symbols.append({"kind": kind, "name": child.name, "line": child.lineno, "depth": 1})
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            kind = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+            symbols.append({"kind": kind, "name": node.name, "line": node.lineno, "depth": 0})
+    return symbols
+
+
+@mcp.custom_route("/lsp/open", methods=["POST"])
+async def lsp_open(request: Request) -> JSONResponse:
+    """Abre un archivo .py en ty (warm-up para hooks PreToolUse)."""
+    if _ty_server is None:
+        return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON inválido"}, status_code=400)
+
+    file_path = body.get("file_path", "")
+    path = Path(file_path).resolve()
+
+    if not path.exists() or path.suffix != ".py":
+        return JSONResponse({"error": f"archivo inválido: {file_path}"}, status_code=400)
+
+    file_uri = path.as_uri()
+    if file_uri not in _open_files:
+        content = path.read_text(encoding="utf-8")
+        await _ty_server.open_file(file_uri, content)
+        _open_files.add(file_uri)
+
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/lsp/file-info", methods=["POST"])
+async def lsp_file_info(request: Request) -> JSONResponse:
+    """Retorna diagnósticos de tipo y símbolos de un archivo .py."""
+    if _ty_server is None:
+        return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON inválido"}, status_code=400)
+
+    file_path = body.get("file_path", "")
+    path = Path(file_path).resolve()
+
+    if not path.exists() or path.suffix != ".py":
+        return JSONResponse({"error": f"archivo inválido: {file_path}"}, status_code=400)
+
+    file_uri = path.as_uri()
+    content = path.read_text(encoding="utf-8")
+
+    if file_uri not in _open_files:
+        await _ty_server.open_file(file_uri, content)
+        _open_files.add(file_uri)
+
+    raw_diags = await _ty_server.diagnostic(file_uri)
+    sev_map = {1: 1, 2: 2, 3: 3, 4: 4}
+    diagnostics = [
+        {
+            "severity": sev_map.get(d.get("severity", 0), 0),
+            "line": d.get("range", {}).get("start", {}).get("line", 0) + 1,
+            "col": d.get("range", {}).get("start", {}).get("character", 0) + 1,
+            "message": d.get("message", ""),
+        }
+        for d in raw_diags
+    ]
+
+    symbols = _extract_symbols(content)
+
+    return JSONResponse({"diagnostics": diagnostics, "symbols": symbols})
 
 
 def main() -> None:
