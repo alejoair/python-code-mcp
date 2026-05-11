@@ -8,6 +8,10 @@ dependencies = [
     "tree-sitter-language-pack==1.8.0",
     "tree-sitter>=0.24,<1",
     "tree-sitter-python>=0.24,<1",
+    # grep-ast brings tree-sitter-language-pack as a transitive dep — same package already
+    # pinned at 1.8.0, so no conflict. PyTreeContext subclass bypasses grep-ast's native
+    # parser (incompatible with tsl-pack >= 1.8 builtins.Parser) by using our own.
+    "grep-ast==0.9.0",
     "ty==0.0.33",
 ]
 
