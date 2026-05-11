@@ -68,7 +68,14 @@ def main() -> None:
     except Exception:
         sys.exit(0)
 
-    print(format_output(file_path, info))
+    context = format_output(file_path, info)
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": context,
+        }
+    }
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

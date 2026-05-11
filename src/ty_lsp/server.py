@@ -19,7 +19,7 @@ from ty_lsp.lsp import TyServer
 
 # Estado global accesible por las rutas HTTP custom
 _ty_server: TyServer | None = None
-_open_files: set[str] = set()
+_open_files: dict[str, int] = {}
 
 
 class FileError(Exception):
@@ -75,10 +75,10 @@ def _is_ignored(rel_path: str, patterns: list[tuple[str, bool]]) -> bool:
     return result
 
 
-async def _open_project_files(ty: TyServer, root: Path) -> set[str]:
+async def _open_project_files(ty: TyServer, root: Path) -> dict[str, int]:
     """Abre todos los archivos .py del proyecto en ty via didOpen.
 
-    Respeta .gitignore. Retorna el set de URIs abiertos.
+    Respeta .gitignore. Retorna dict de URI → versión.
     """
     patterns = _parse_gitignore(root)
 
@@ -89,12 +89,12 @@ async def _open_project_files(ty: TyServer, root: Path) -> set[str]:
             continue
         py_files.append(p)
 
-    open_uris: set[str] = set()
+    open_uris: dict[str, int] = {}
     for p in py_files:
         file_uri = p.resolve().as_uri()
         content = p.read_text(encoding="utf-8")
         await ty.open_file(file_uri, content)
-        open_uris.add(file_uri)
+        open_uris[file_uri] = 1
 
     if py_files:
         print(
@@ -111,7 +111,7 @@ async def _ensure_file_open(ctx: Context, file_path: str) -> str:
     Retorna el file URI. Lanza FileError si el path es inválido.
     """
     ty: TyServer = ctx.lifespan_context["ty"]
-    open_files: set[str] = ctx.lifespan_context["open_files"]
+    open_files: dict[str, int] = ctx.lifespan_context["open_files"]
 
     path = Path(file_path).resolve()
     if not path.exists():
@@ -123,7 +123,7 @@ async def _ensure_file_open(ctx: Context, file_path: str) -> str:
     if file_uri not in open_files:
         content = path.read_text(encoding="utf-8")
         await ty.open_file(file_uri, content)
-        open_files.add(file_uri)
+        open_files[file_uri] = 1
 
     return file_uri
 
@@ -149,7 +149,7 @@ async def ty_lifespan(server: FastMCP):
 
     await ty.stop()
     _ty_server = None
-    _open_files = set()
+    _open_files = {}
 
 
 mcp = FastMCP(
@@ -386,7 +386,7 @@ async def lsp_open(request: Request) -> JSONResponse:
     if file_uri not in _open_files:
         content = path.read_text(encoding="utf-8")
         await _ty_server.open_file(file_uri, content)
-        _open_files.add(file_uri)
+        _open_files[file_uri] = 1
 
     return JSONResponse({"ok": True})
 
@@ -413,7 +413,7 @@ async def lsp_file_info(request: Request) -> JSONResponse:
 
     if file_uri not in _open_files:
         await _ty_server.open_file(file_uri, content)
-        _open_files.add(file_uri)
+        _open_files[file_uri] = 1
 
     raw_diags = await _ty_server.diagnostic(file_uri)
     sev_map = {1: 1, 2: 2, 3: 3, 4: 4}
@@ -430,6 +430,37 @@ async def lsp_file_info(request: Request) -> JSONResponse:
     symbols = _extract_symbols(content)
 
     return JSONResponse({"diagnostics": diagnostics, "symbols": symbols})
+
+
+@mcp.custom_route("/lsp/reload", methods=["POST"])
+async def lsp_reload(request: Request) -> JSONResponse:
+    """Recarga un .py en ty post-edición (didChange + didOpen fallback)."""
+    if _ty_server is None:
+        return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON inválido"}, status_code=400)
+
+    file_path = body.get("file_path", "")
+    path = Path(file_path).resolve()
+
+    if not path.exists() or path.suffix != ".py":
+        return JSONResponse({"error": f"archivo inválido: {file_path}"}, status_code=400)
+
+    file_uri = path.as_uri()
+    content = path.read_text(encoding="utf-8")
+
+    if file_uri in _open_files:
+        version = _open_files[file_uri] + 1
+        await _ty_server.change_file(file_uri, content, version)
+        _open_files[file_uri] = version
+    else:
+        await _ty_server.open_file(file_uri, content)
+        _open_files[file_uri] = 1
+
+    return JSONResponse({"ok": True})
 
 
 def main() -> None:

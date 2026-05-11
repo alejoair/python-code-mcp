@@ -19,6 +19,7 @@ class TyServer:
         self._msg_id = 0
         self._stderr_task: asyncio.Task | None = None
         self._initialized = False
+        self._lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Lanza `ty server` como subprocess."""
@@ -104,14 +105,17 @@ class TyServer:
 
         Las notificaciones (diagnostics, etc.) que lleguen entremedio se
         descartan. Solo retorna la respuesta con el ID del request enviado.
+
+        Usa un lock para evitar lecturas concurrentes de stdout.
         """
-        msg_id = await self.send_request(method, params)
-        while True:
-            msg = await asyncio.wait_for(self.read_message(), timeout=timeout)
-            if msg is None:
-                raise ConnectionError("ty cerró la conexión")
-            if "id" in msg and msg["id"] == msg_id:
-                return msg
+        async with self._lock:
+            msg_id = await self.send_request(method, params)
+            while True:
+                msg = await asyncio.wait_for(self.read_message(), timeout=timeout)
+                if msg is None:
+                    raise ConnectionError("ty cerró la conexión")
+                if "id" in msg and msg["id"] == msg_id:
+                    return msg
 
     async def initialize(self, root_uri: str) -> dict:
         """Inicializa la comunicación LSP con ty.
@@ -138,6 +142,19 @@ class TyServer:
                 "version": version,
                 "text": content,
             }
+        })
+
+    async def change_file(self, file_uri: str, content: str, version: int) -> None:
+        """Notifica a ty que el contenido de un archivo abierto ha cambiado."""
+        await self.send_notification("textDocument/didChange", {
+            "textDocument": {"uri": file_uri, "version": version},
+            "contentChanges": [{"text": content}],
+        })
+
+    async def close_file(self, file_uri: str) -> None:
+        """Notifica a ty que un archivo fue cerrado."""
+        await self.send_notification("textDocument/didClose", {
+            "textDocument": {"uri": file_uri},
         })
 
     async def hover(self, file_uri: str, line: int, character: int) -> dict | None:
@@ -261,7 +278,7 @@ class TyServer:
 
     async def stop(self) -> None:
         """Detiene el servidor ty."""
-        if self.process:
+        if self.process and self.process.returncode is None:
             self.process.terminate()
             await self.process.wait()
             self.process = None

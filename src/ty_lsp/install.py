@@ -1,6 +1,6 @@
 """
 install.py — Registra python-code-mcp como servidor MCP en Claude Code,
-copia los hooks y configura ~/.claude/settings.json.
+copia los hooks y configura .claude/settings.json del proyecto.
 
 Ejecución: python-code-mcp install
 """
@@ -18,25 +18,28 @@ def find_claude_cli() -> str | None:
 
 
 def _install_hooks() -> None:
-    """Copia los hooks al directorio ~/.claude/hooks/ y actualiza settings.json."""
+    """Copia los hooks al directorio .claude/hooks/ del proyecto y actualiza settings.json."""
     hooks_src = Path(__file__).parent / "hooks"
-    hooks_dst = Path.home() / ".claude" / "hooks"
+    project_root = Path.cwd()
+    hooks_dst = project_root / ".claude" / "hooks"
     hooks_dst.mkdir(parents=True, exist_ok=True)
 
     # Copiar scripts de hooks
     for src_name, dst_name in [
         ("pre_tool_use.py", "python-code-mcp-pre.py"),
         ("post_tool_use.py", "python-code-mcp-post.py"),
+        ("pre_tool_use_edit.py", "python-code-mcp-pre-edit.py"),
+        ("post_tool_use_edit.py", "python-code-mcp-post-edit.py"),
     ]:
         src = hooks_src / src_name
         dst = hooks_dst / dst_name
         shutil.copy2(src, dst)
         print(f"[OK] Hook copiado: {dst}")
 
-    # Usar 'python' en lugar de sys.executable para evitar problemas con
-    # barras invertidas en Windows que bash no interpreta correctamente
-    pre_cmd = "python ~/.claude/hooks/python-code-mcp-pre.py"
-    post_cmd = "python ~/.claude/hooks/python-code-mcp-post.py"
+    # Ruta absoluta en formato posix para los comandos
+    hooks_dir_posix = hooks_dst.as_posix()
+    pre_cmd = f"python {hooks_dir_posix}/python-code-mcp-pre.py"
+    post_cmd = f"python {hooks_dir_posix}/python-code-mcp-post.py"
 
     new_pre_entry = {
         "matcher": "Read",
@@ -47,12 +50,24 @@ def _install_hooks() -> None:
         "hooks": [{"type": "command", "command": post_cmd}],
     }
 
-    # Leer settings.json existente
-    settings_path = Path.home() / ".claude" / "settings.json"
+    edit_pre_cmd = f"python {hooks_dir_posix}/python-code-mcp-pre-edit.py"
+    edit_post_cmd = f"python {hooks_dir_posix}/python-code-mcp-post-edit.py"
+
+    new_edit_pre_entry = {
+        "matcher": "Edit|Write",
+        "hooks": [{"type": "command", "command": edit_pre_cmd}],
+    }
+    new_edit_post_entry = {
+        "matcher": "Edit|Write",
+        "hooks": [{"type": "command", "command": edit_post_cmd}],
+    }
+
+    # Leer/crear .claude/settings.json del proyecto
+    settings_path = project_root / ".claude" / "settings.json"
     if settings_path.exists():
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
     else:
-        settings = {"$schema": "https://json.schemastore.org/claude-code-settings.json"}
+        settings = {}
 
     hooks = settings.setdefault("hooks", {})
 
@@ -62,6 +77,7 @@ def _install_hooks() -> None:
         if not _is_our_hook(e)
     ]
     pre_entries.append(new_pre_entry)
+    pre_entries.append(new_edit_pre_entry)
     hooks["PreToolUse"] = pre_entries
 
     # Mergear PostToolUse: igual
@@ -70,6 +86,7 @@ def _install_hooks() -> None:
         if not _is_our_hook(e)
     ]
     post_entries.append(new_post_entry)
+    post_entries.append(new_edit_post_entry)
     hooks["PostToolUse"] = post_entries
 
     settings_path.write_text(
@@ -100,7 +117,7 @@ def main() -> None:
 
     cmd = [
         claude, "mcp", "add",
-        "-s", "user",
+        "-s", "project",
         "-t", "http",
         "python-code-mcp",
         url,
