@@ -178,6 +178,36 @@ class TyServer:
             return None
         return result
 
+    async def workspace_diagnostic(self) -> dict[str, list[dict]]:
+        """Recolecta diagnósticos de todo el workspace via publishDiagnostics.
+
+        ty usa el modelo push: tras abrir archivos, envía notificaciones
+        textDocument/publishDiagnostics con los diagnósticos de cada archivo.
+        Este método lee todas las notificaciones pendientes y las agrupa por URI.
+
+        El motor de inferencia analiza el grafo de módulos completo, por lo que
+        cambios en un archivo se propagan a sus importadores.
+
+        Returns:
+            Dict de URI → lista de diagnósticos.
+        """
+        async with self._lock:
+            all_diags: dict[str, list[dict]] = {}
+            for _ in range(500):
+                try:
+                    msg = await asyncio.wait_for(self.read_message(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    break
+                if msg is None:
+                    break
+                if msg.get("method") == "textDocument/publishDiagnostics":
+                    params = msg.get("params", {})
+                    uri = params.get("uri", "")
+                    diags = params.get("diagnostics", [])
+                    if diags:
+                        all_diags[uri] = diags
+            return all_diags
+
     async def diagnostic(self, file_uri: str) -> list[dict]:
         """Solicita diagnósticos (type check) para un archivo.
 

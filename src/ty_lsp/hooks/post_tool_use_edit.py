@@ -179,6 +179,64 @@ def main() -> None:
         for d in sorted(resolved_diags, key=lambda d: (d["line"], d["col"])):
             lines.append(_format_diag(d))
 
+    # --- Cross-file diagnostics ---
+    workspace_before = snapshot.get("workspace_diagnostics", {})
+    workspace_after: dict = {}
+    try:
+        resp = httpx.post(
+            "http://127.0.0.1:8000/lsp/workspace-diff",
+            json={},
+            timeout=30.0,
+        )
+        if resp.status_code == 200:
+            workspace_after = resp.json().get("diagnostics_by_file", {})
+    except Exception:
+        pass
+
+    if workspace_after:
+        from pathlib import Path
+        edited_uri = Path(file_path).resolve().as_uri()
+        cross_lines: list[str] = []
+        total_cross = 0
+        affected_files = 0
+
+        for uri, after_file_diags in workspace_after.items():
+            if uri == edited_uri:
+                continue
+            if not after_file_diags:
+                continue
+
+            before_file_diags = workspace_before.get(uri, [])
+            before_keys = set(
+                _diag_key(d["severity"], d["line"], d["col"], d["message"])
+                for d in before_file_diags
+            )
+            after_keys = set(
+                _diag_key(d["severity"], d["line"], d["col"], d["message"])
+                for d in after_file_diags
+            )
+            new_cross = after_keys - before_keys
+            if not new_cross:
+                continue
+
+            affected_files += 1
+            # Convertir URI a path legible
+            path = uri
+            if path.startswith("file:///"):
+                from urllib.parse import unquote
+                path = unquote(path[8:])
+                if len(path) > 1 and path[1] == ":":
+                    pass  # Windows path ya correcto
+            cross_lines.append(f"\n  {path}:")
+            for k in sorted(new_cross):
+                total_cross += 1
+                cross_lines.append(f"    {SEV_LABEL.get(k[0], '?')}  line {k[1]}, col {k[2]}: {k[3]}")
+
+        if cross_lines:
+            lines.append("")
+            lines.append(f"Cross-file impact: {total_cross} new issue(s) in {affected_files} other file(s):")
+            lines.extend(cross_lines)
+
     output_text = "\n".join(lines)
     result = {
         "hookSpecificOutput": {

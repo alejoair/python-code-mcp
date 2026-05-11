@@ -272,15 +272,54 @@ async def type_check(file_path: str, ctx: Context) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool
+async def workspace_check(ctx: Context) -> str:
+    """Run type checking across the entire workspace using ty's semantic engine.
+
+    This analyzes all Python files in the project and reports diagnostics grouped
+    by file. Unlike per-file type_check, this uses ty's inference engine over the
+    full module graph — if you change a public signature in one file, importers in
+    other files will show updated diagnostics in the same pass.
+
+    Use this to answer "what broke with this change?" at the project level.
+    """
+    ty: TyServer = ctx.lifespan_context["ty"]
+    all_diags = await ty.workspace_diagnostic()
+
+    if not all_diags:
+        return "No se encontraron errores de tipo en el workspace."
+
+    lines: list[str] = []
+    total_diags = 0
+    sev_map = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
+
+    for uri, diags in all_diags.items():
+        path = _uri_to_path(uri)
+        lines.append(f"\n{path}:")
+        for diag in diags:
+            severity = diag.get("severity", "?")
+            sev_label = sev_map.get(severity, str(severity))
+            range_ = diag.get("range", {})
+            start = range_.get("start", {})
+            line_num = start.get("line", "?") + 1
+            col_num = start.get("character", "?") + 1
+            message = diag.get("message", "Unknown error")
+            lines.append(f"  [{sev_label}] line {line_num}, col {col_num}: {message}")
+            total_diags += 1
+
+    if total_diags == 0:
+        return "No se encontraron errores de tipo en el workspace."
+
+    lines.insert(0, f"{total_diags} issue(s) en el workspace:")
+    return "\n".join(lines)
+
+
 def _format_location(loc: dict) -> str:
     """Formatea una Location LSP (uri + range) como texto legible."""
     from urllib.parse import urlparse, unquote
 
     uri = loc.get("uri", "")
-    path = unquote(urlparse(uri).path)
-    # En Windows, quitar el leading / del file URI
-    if len(path) > 2 and path[0] == "/" and path[2] == ":":
-        path = path[1:]
+    path = _uri_to_path(uri)
 
     range_ = loc.get("range", {})
     start = range_.get("start", {})
@@ -288,6 +327,16 @@ def _format_location(loc: dict) -> str:
     col_num = start.get("character", 0) + 1
 
     return f"{path}:{line_num}:{col_num}"
+
+
+def _uri_to_path(uri: str) -> str:
+    """Convierte un file URI a path del filesystem."""
+    from urllib.parse import urlparse, unquote
+
+    path = unquote(urlparse(uri).path)
+    if len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path
 
 
 @mcp.tool
@@ -613,6 +662,35 @@ async def lsp_reload(request: Request) -> JSONResponse:
         _ts_index.reindex_file(str(path))
 
     return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/lsp/workspace-diff", methods=["POST"])
+async def lsp_workspace_diff(request: Request) -> JSONResponse:
+    """Retorna diagnósticos de todo el workspace agrupados por archivo.
+
+    Usa textDocument/diagnostic por cada archivo abierto (pull model)
+    en vez de publishDiagnostics (push) para garantizar resultados frescos.
+    """
+    if _ty_server is None:
+        return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
+
+    sev_map = {1: 1, 2: 2, 3: 3, 4: 4}
+    result: dict[str, list[dict]] = {}
+    for uri in _open_files:
+        diags = await _ty_server.diagnostic(uri)
+        simplified = [
+            {
+                "severity": sev_map.get(d.get("severity", 0), 0),
+                "line": d.get("range", {}).get("start", {}).get("line", 0) + 1,
+                "col": d.get("range", {}).get("start", {}).get("character", 0) + 1,
+                "message": d.get("message", ""),
+            }
+            for d in diags
+        ]
+        if simplified:
+            result[uri] = simplified
+
+    return JSONResponse({"diagnostics_by_file": result})
 
 
 def main() -> None:

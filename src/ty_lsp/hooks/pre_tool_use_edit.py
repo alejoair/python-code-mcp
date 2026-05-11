@@ -65,6 +65,19 @@ def main() -> None:
     except Exception:
         pass
 
+    # Capturar diagnósticos de todo el workspace (para detección cross-file)
+    workspace_diagnostics: dict = {}
+    try:
+        resp = httpx.post(
+            "http://127.0.0.1:8000/lsp/workspace-diff",
+            json={},
+            timeout=30.0,
+        )
+        if resp.status_code == 200:
+            workspace_diagnostics = resp.json().get("diagnostics_by_file", {})
+    except Exception:
+        pass
+
     # Guardar snapshot en archivo temporal
     snapshot = {
         "file_path": file_path,
@@ -72,6 +85,7 @@ def main() -> None:
         "tool_input": tool_input,
         "before_content": before_content,
         "diagnostics": diagnostics,
+        "workspace_diagnostics": workspace_diagnostics,
     }
 
     key = hashlib.sha256(file_path.encode()).hexdigest()[:16]
