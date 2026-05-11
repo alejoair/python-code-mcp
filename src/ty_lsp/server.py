@@ -343,7 +343,7 @@ def main() -> None:
         run_install()
         return
 
-    mcp.run(transport="stdio")
+    mcp.run(transport="http")
 
 
 if __name__ == "__main__":

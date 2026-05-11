@@ -22,20 +22,14 @@ def main() -> None:
         print("Instálalo con: npm install -g @anthropic-ai/claude-code")
         sys.exit(1)
 
-    server_cmd = "python-code-mcp"
-
-    # Verificar que el servidor está instalado
-    if shutil.which(server_cmd) is None:
-        print("Error: no se encontró el comando '" + server_cmd + "'.")
-        print("Verifica que python-code-mcp esté instalado: pip install python-code-mcp")
-        sys.exit(1)
+    url = "http://127.0.0.1:8000/mcp"
 
     cmd = [
         claude, "mcp", "add",
         "-s", "user",
-        "-t", "stdio",
+        "-t", "http",
         "python-code-mcp",
-        "--", server_cmd,
+        url,
     ]
 
     print("Ejecutando: " + " ".join(cmd))
@@ -43,7 +37,8 @@ def main() -> None:
 
     if result.returncode == 0:
         print("\n[OK] Servidor MCP 'python-code-mcp' registrado exitosamente.")
-        print("     Transporte stdio, alcance user (global).")
+        print("     Transporte HTTP en " + url)
+        print("     Inicia el servidor con: python-code-mcp")
     else:
         print("\n[ERROR] No se pudo registrar el servidor (codigo %d)." % result.returncode)
         sys.exit(result.returncode)
