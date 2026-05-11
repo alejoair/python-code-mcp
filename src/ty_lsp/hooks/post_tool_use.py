@@ -7,7 +7,11 @@ Claude lo vea como contexto adicional.
 """
 
 import json
+import os
 import sys
+
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
 
 try:
     import httpx

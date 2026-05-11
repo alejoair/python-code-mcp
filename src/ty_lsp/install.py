@@ -33,10 +33,10 @@ def _install_hooks() -> None:
         shutil.copy2(src, dst)
         print(f"[OK] Hook copiado: {dst}")
 
-    # Comando usando el mismo Python que ejecuta este script
-    python = sys.executable
-    pre_cmd = f"{python} ~/.claude/hooks/python-code-mcp-pre.py"
-    post_cmd = f"{python} ~/.claude/hooks/python-code-mcp-post.py"
+    # Usar 'python' en lugar de sys.executable para evitar problemas con
+    # barras invertidas en Windows que bash no interpreta correctamente
+    pre_cmd = "python ~/.claude/hooks/python-code-mcp-pre.py"
+    post_cmd = "python ~/.claude/hooks/python-code-mcp-post.py"
 
     new_pre_entry = {
         "matcher": "Read",
