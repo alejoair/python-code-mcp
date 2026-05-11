@@ -16,10 +16,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ty_lsp.lsp import TyServer
+from ty_lsp.treesitter import TreeSitterIndex, list_file_symbols, extract_function_body, extract_class_skeleton, extract_enclosing, find_identifier_at
 
 # Estado global accesible por las rutas HTTP custom
 _ty_server: TyServer | None = None
 _open_files: dict[str, int] = {}
+_ts_index: TreeSitterIndex | None = None
 
 
 class FileError(Exception):
@@ -75,12 +77,13 @@ def _is_ignored(rel_path: str, patterns: list[tuple[str, bool]]) -> bool:
     return result
 
 
-async def _open_project_files(ty: TyServer, root: Path) -> dict[str, int]:
+async def _open_project_files(ty: TyServer, root: Path, patterns: list[tuple[str, bool]] | None = None) -> dict[str, int]:
     """Abre todos los archivos .py del proyecto en ty via didOpen.
 
     Respeta .gitignore. Retorna dict de URI → versión.
     """
-    patterns = _parse_gitignore(root)
+    if patterns is None:
+        patterns = _parse_gitignore(root)
 
     py_files: list[Path] = []
     for p in root.rglob("*.py"):
@@ -105,6 +108,16 @@ async def _open_project_files(ty: TyServer, root: Path) -> dict[str, int]:
     return open_uris
 
 
+def _validate_py_file(file_path: str) -> Path:
+    """Valida que file_path exista y sea .py. Lanza FileError si no."""
+    path = Path(file_path).resolve()
+    if not path.exists():
+        raise FileError(f"Error: el archivo no existe: {file_path}")
+    if not path.suffix == ".py":
+        raise FileError(f"Error: el archivo no es Python: {file_path}")
+    return path
+
+
 async def _ensure_file_open(ctx: Context, file_path: str) -> str:
     """Valida file_path y asegura que ty lo tenga abierto via didOpen.
 
@@ -113,11 +126,7 @@ async def _ensure_file_open(ctx: Context, file_path: str) -> str:
     ty: TyServer = ctx.lifespan_context["ty"]
     open_files: dict[str, int] = ctx.lifespan_context["open_files"]
 
-    path = Path(file_path).resolve()
-    if not path.exists():
-        raise FileError(f"Error: el archivo no existe: {file_path}")
-    if not path.suffix == ".py":
-        raise FileError(f"Error: el archivo no es Python: {file_path}")
+    path = _validate_py_file(file_path)
 
     file_uri = path.as_uri()
     if file_uri not in open_files:
@@ -131,25 +140,32 @@ async def _ensure_file_open(ctx: Context, file_path: str) -> str:
 @asynccontextmanager
 async def ty_lifespan(server: FastMCP):
     """Lifespan que inicia y detiene ty server como subprocess."""
-    global _ty_server, _open_files
+    global _ty_server, _open_files, _ts_index
 
     root_path = Path.cwd()
     root_uri = root_path.as_uri()
+
+    patterns = _parse_gitignore(root_path)
 
     ty = TyServer()
     await ty.start()
     await ty.initialize(root_uri)
 
-    open_files = await _open_project_files(ty, root_path)
+    open_files = await _open_project_files(ty, root_path, patterns)
+
+    ts_index = TreeSitterIndex()
+    ts_index.build(root_path, patterns)
 
     _ty_server = ty
     _open_files = open_files
+    _ts_index = ts_index
 
-    yield {"ty": ty, "open_files": open_files}
+    yield {"ty": ty, "open_files": open_files, "ts_index": ts_index}
 
     await ty.stop()
     _ty_server = None
     _open_files = {}
+    _ts_index = None
 
 
 mcp = FastMCP(
@@ -174,7 +190,7 @@ async def hover(
 
     Args:
         file_path: Path absoluto al archivo Python.
-        line: Línea del símbolo (0-indexed).
+        line: Línea del símbolo (1-indexed).
         character: Columna del símbolo (0-indexed).
         ctx: Contexto MCP (inyectado automáticamente).
 
@@ -188,14 +204,21 @@ async def hover(
 
     ty: TyServer = ctx.lifespan_context["ty"]
 
-    # Solicitar hover
-    result = await ty.hover(file_uri, line, character)
-    if result is None:
-        return "No hay información de hover disponible para esa posición."
+    # Convertir a 0-indexed para ty y tree-sitter
+    line0 = line - 1
 
-    # Extraer el contenido del hover
-    contents = result.get("contents")
-    if contents is None:
+    # Solicitar hover
+    result = await ty.hover(file_uri, line0, character)
+    contents = result.get("contents") if result else None
+
+    # Si no hay info, usar tree-sitter para encontrar el identificador y reintentar
+    if not contents:
+        ident = find_identifier_at(file_path, line0, character)
+        if ident is not None and (ident[1] != character or ident[0] != line0):
+            result = await ty.hover(file_uri, ident[0], ident[1])
+            contents = result.get("contents") if result else None
+
+    if not contents:
         return "No hay información de hover disponible para esa posición."
 
     if isinstance(contents, dict):
@@ -282,7 +305,7 @@ async def find_definition(
 
     Args:
         file_path: Path absoluto al archivo Python.
-        line: Línea del símbolo (0-indexed).
+        line: Línea del símbolo (1-indexed).
         col: Columna del símbolo (0-indexed).
         ctx: Contexto MCP (inyectado automáticamente).
 
@@ -295,7 +318,13 @@ async def find_definition(
         return str(e)
 
     ty: TyServer = ctx.lifespan_context["ty"]
-    locations = await ty.definition(file_uri, line, col)
+    line0 = line - 1
+    locations = await ty.definition(file_uri, line0, col)
+
+    if not locations:
+        ident = find_identifier_at(file_path, line0, col)
+        if ident is not None and (ident[1] != col or ident[0] != line0):
+            locations = await ty.definition(file_uri, ident[0], ident[1])
 
     if not locations:
         return "No se encontró la definición del símbolo."
@@ -318,7 +347,7 @@ async def find_references(
 
     Args:
         file_path: Path absoluto al archivo Python.
-        line: Línea del símbolo (0-indexed).
+        line: Línea del símbolo (1-indexed).
         col: Columna del símbolo (0-indexed).
         ctx: Contexto MCP (inyectado automáticamente).
 
@@ -331,13 +360,133 @@ async def find_references(
         return str(e)
 
     ty: TyServer = ctx.lifespan_context["ty"]
-    locations = await ty.references(file_uri, line, col)
+    line0 = line - 1
+    locations = await ty.references(file_uri, line0, col)
+
+    if not locations:
+        ident = find_identifier_at(file_path, line0, col)
+        if ident is not None and (ident[1] != col or ident[0] != line0):
+            locations = await ty.references(file_uri, ident[0], ident[1])
 
     if not locations:
         return "No se encontraron referencias al símbolo."
 
     result_lines = [_format_location(loc) for loc in locations]
     return "\n".join(result_lines)
+
+
+@mcp.tool
+async def list_symbols(
+    file_path: str,
+    kind: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Structural outline of a Python file. Shows classes, methods, and functions with line numbers.
+
+    Use this to quickly understand the structure of a file without reading the entire contents.
+
+    Args:
+        file_path: Absolute path to the Python file.
+        kind: Optional filter — "class", "function", or "method" to show only that kind.
+
+    Returns:
+        Human-readable structural outline with symbol names and line numbers.
+    """
+    try:
+        _validate_py_file(file_path)
+    except FileError as e:
+        return str(e)
+
+    return list_file_symbols(file_path, kind_filter=kind)
+
+
+@mcp.tool
+async def get_function_body(
+    file_path: str,
+    function_name: str,
+    class_name: str | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Extract the exact source code of a function or method by name, including decorators and docstring.
+
+    Use this instead of reading the entire file when you only need one specific function.
+    Preserves original formatting, comments, and docstrings.
+
+    Args:
+        file_path: Absolute path to the Python file.
+        function_name: Name of the function to extract.
+        class_name: Optional class name if extracting a method.
+
+    Returns:
+        The full source code of the function, or an error message if not found.
+    """
+    try:
+        _validate_py_file(file_path)
+    except FileError as e:
+        return str(e)
+
+    result = extract_function_body(file_path, function_name, class_name)
+    if result is None:
+        loc = f"{class_name}.{function_name}" if class_name else function_name
+        return f"Function '{loc}' not found in {file_path}"
+    return result
+
+
+@mcp.tool
+async def get_class_skeleton(
+    file_path: str,
+    class_name: str,
+    ctx: Context | None = None,
+) -> str:
+    """Extract class structure: base classes, method signatures, decorators, and docstrings. No method bodies.
+
+    Use this to understand a class's interface without reading implementation details.
+
+    Args:
+        file_path: Absolute path to the Python file.
+        class_name: Name of the class to extract.
+
+    Returns:
+        The class skeleton with method signatures but no implementation bodies.
+    """
+    try:
+        _validate_py_file(file_path)
+    except FileError as e:
+        return str(e)
+
+    result = extract_class_skeleton(file_path, class_name)
+    if result is None:
+        return f"Class '{class_name}' not found in {file_path}"
+    return result
+
+
+@mcp.tool
+async def extract_enclosing_unit(
+    file_path: str,
+    line: int,
+    ctx: Context | None = None,
+) -> str:
+    """Find the minimal enclosing unit (function, method, or class) for a given line number.
+
+    Use this when ty reports an error at a line and you want to see only the surrounding context.
+    Returns the complete source of the enclosing unit with a header indicating what was found.
+
+    Args:
+        file_path: Absolute path to the Python file.
+        line: Line number (1-indexed).
+
+    Returns:
+        Source code of the enclosing unit with a location header.
+    """
+    try:
+        _validate_py_file(file_path)
+    except FileError as e:
+        return str(e)
+
+    result = extract_enclosing(file_path, line - 1)
+    if result is None:
+        return f"No enclosing unit found at line {line} in {file_path}"
+    return result
 
 
 # rename_symbol desactivada — el rename de ty no es confiable (rename textual, no semántico).
@@ -459,6 +608,9 @@ async def lsp_reload(request: Request) -> JSONResponse:
     else:
         await _ty_server.open_file(file_uri, content)
         _open_files[file_uri] = 1
+
+    if _ts_index is not None:
+        _ts_index.reindex_file(str(path))
 
     return JSONResponse({"ok": True})
 

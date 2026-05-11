@@ -5,9 +5,13 @@
 Las dependencias están definidas en `pyproject.toml` con versiones exactas:
 
 - **fastmcp** `3.2.4` — Framework para construir servidores MCP (Model Context Protocol)
+- **httpx** `>=0.27` — Cliente HTTP asíncrono, usado por los hooks para comunicarse con el servidor MCP
+- **tree-sitter-language-pack** `1.8.0` — Gramáticas pre-compiladas de tree-sitter para 305 lenguajes
+- **tree-sitter** `>=0.24,<1` — Core bindings para parser tree-sitter (Parser, Node, Query, Tree)
+- **tree-sitter-python** `>=0.24,<1` — Gramática Python para tree-sitter
 - **ty** `0.0.33` — Type checker para Python, escrito en Rust por Astral
 
-> **Nota:** Los hooks (`pre_tool_use.py`, `post_tool_use.py`) usan `httpx` en runtime, pero NO está declarado como dependencia. Los hooks hacen `sys.exit(0)` silencioso si `httpx` no está disponible.
+> **Nota:** Los hooks hacen `sys.exit(0)` silencioso si `httpx` no está disponible.
 
 ## ty como servidor LSP
 
@@ -108,6 +112,7 @@ python-code-mcp install    → registra el servidor en Claude Code y sale
 |---|---|---|
 | `src/ty_lsp/server.py` | `mcp`, `FileError`, `main()` | Servidor FastMCP + entry point + rutas HTTP custom |
 | `src/ty_lsp/lsp.py` | `TyServer` | Cliente LSP para ty (subprocess, JSON-RPC 2.0, framing Content-Length) |
+| `src/ty_lsp/treesitter.py` | `TreeSitterIndex` | Índice de proyecto tree-sitter, funciones de extracción estructural |
 | `src/ty_lsp/install.py` | `run_install()` | Lógica de instalación (`claude mcp add`) + registro de hooks |
 | `src/ty_lsp/hooks/pre_tool_use.py` | — | Hook PreToolUse: envía POST a `/lsp/open` para calentar ty |
 | `src/ty_lsp/hooks/post_tool_use.py` | — | Hook PostToolUse: consulta `/lsp/file-info` e imprime diagnósticos y símbolos |
@@ -130,6 +135,7 @@ Variables globales usadas por las rutas HTTP custom (fuera del contexto MCP):
 
 - `_ty_server: TyServer | None` — Referencia al servidor LSP activo
 - `_open_files: dict[str, int]` — Dict de archivos abiertos en ty (URI → versión)
+- `_ts_index: TreeSitterIndex | None` — Índice tree-sitter del proyecto
 
 ### Funciones auxiliares (`server.py`)
 
@@ -138,20 +144,34 @@ Variables globales usadas por las rutas HTTP custom (fuera del contexto MCP):
 | `_parse_gitignore(root)` | Parsea `.gitignore` y retorna lista de `(pattern, is_negation)` |
 | `_is_ignored(rel_path, patterns)` | Determina si un path relativo es ignorado por gitignore |
 | `_open_project_files(ty, root)` | Abre todos los `.py` del proyecto en ty (respeta `.gitignore`) |
+| `_validate_py_file(file_path)` | Valida que path exista y sea `.py`, lanza `FileError` si no |
 | `_ensure_file_open(ctx, file_path)` | Valida path y asegura que ty tenga el archivo abierto via didOpen |
 | `_format_location(loc)` | Formatea una `Location` LSP (uri + range) como texto legible |
 | `_extract_symbols(source)` | Extrae clases y funciones de código Python usando `ast` (2 niveles de profundidad) |
 
-### Tools MCP expuestas (4 tools)
+### Tools MCP expuestas (8 tools)
+
+**Tools semánticas (ty LSP):**
 
 | Tool | Parámetros | Descripción |
 |---|---|---|
-| `hover` | `file_path`, `line`, `character` | Info de tipo inferido para un símbolo |
+| `hover` | `file_path`, `line`, `character` | Info de tipo inferido para un símbolo. Línea 1-indexed, columna 0-indexed. |
 | `type_check` | `file_path` | Diagnósticos de tipo para un archivo |
-| `find_definition` | `file_path`, `line`, `col` | Ubicación de la definición de un símbolo |
-| `find_references` | `file_path`, `line`, `col` | Todas las referencias a un símbolo en el workspace |
+| `find_definition` | `file_path`, `line`, `col` | Ubicación de la definición de un símbolo. Línea 1-indexed. |
+| `find_references` | `file_path`, `line`, `col` | Todas las referencias a un símbolo en el workspace. Línea 1-indexed. |
+
+> **Nota:** Las tools `hover`, `find_definition` y `find_references` usan tree-sitter (`find_identifier_at`) para corregir posiciones imprecisas automáticamente — si no hay info en la posición exacta, buscan el identifier más cercano y reintentan.
 
 > **Nota:** `rename_symbol` está **desactivada**. El rename de ty es textual (no semántico) y puede corromper archivos sin relación con el símbolo renombrado.
+
+**Tools estructurales (tree-sitter):**
+
+| Tool | Parámetros | Descripción |
+|---|---|---|
+| `list_symbols` | `file_path`, `kind?` | Outline de un archivo: clases, métodos, funciones con números de línea. Filtrable por kind: `class`, `function`, `method`. |
+| `get_function_body` | `file_path`, `function_name`, `class_name?` | Código fuente exacto de una función o método (con decorators y docstring) |
+| `get_class_skeleton` | `file_path`, `class_name` | Estructura de una clase: bases, firmas de métodos, decorators, docstrings. Sin bodies. |
+| `extract_enclosing_unit` | `file_path`, `line` | Unidad mínima que contiene una línea (función, clase). Línea 1-indexed. |
 
 ### Rutas HTTP personalizadas
 
@@ -163,7 +183,7 @@ Además de las tools MCP, el servidor expone tres endpoints HTTP para los hooks:
 | `/lsp/file-info` | POST | Retorna diagnósticos de tipo y símbolos AST para un `.py` |
 | `/lsp/reload` | POST | Recarga un `.py` en ty post-edición (didChange + didOpen fallback) |
 
-Ambas rutas usan las variables globales `_ty_server` y `_open_files` (no el contexto lifespan, ya que son endpoints HTTP fuera del contexto MCP tool).
+Ambas rutas usan las variables globales `_ty_server`, `_open_files` y `_ts_index` (no el contexto lifespan, ya que son endpoints HTTP fuera del contexto MCP tool).
 
 ### Sistema de Hooks
 
@@ -172,12 +192,12 @@ Los hooks se instalan durante `python-code-mcp install` y se integran con Claude
 **Hooks para Read:**
 
 1. **PreToolUse** (`pre_tool_use.py`): Al leer un `.py`, envía POST a `/lsp/open` para precargar el archivo en ty (timeout 3s)
-2. **PostToolUse** (`post_tool_use.py`): Tras leer un `.py`, consulta `/lsp/file-info` e imprime símbolos y diagnósticos como contexto adicional para Claude (timeout 10s)
+2. **PostToolUse** (`post_tool_use.py`): Tras leer un `.py`, consulta `/lsp/file-info` y devuelve símbolos y diagnósticos como contexto adicional para Claude via `hookSpecificOutput.additionalContext` (JSON) (timeout 10s)
 
 **Hooks para Edit/Write:**
 
 3. **PreToolUse** (`pre_tool_use_edit.py`): Antes de editar/escribir un `.py`, captura diagnósticos actuales y contenido del archivo en un snapshot temporal (`$TEMP/ty-edit-{sha256[:16]}.json`). No imprime nada (silencioso).
-4. **PostToolUse** (`post_tool_use_edit.py`): Tras editar/escribir un `.py`, recarga el archivo en ty via `/lsp/reload`, compara diagnósticos antes/después con remapeo de líneas, y muestra solo los errores NUEVOS introducidos por el cambio. También muestra errores resueltos.
+4. **PostToolUse** (`post_tool_use_edit.py`): Tras editar/escribir un `.py`, recarga el archivo en ty via `/lsp/reload`, compara diagnósticos antes/después con remapeo de líneas, y muestra solo los errores NUEVOS introducidos por el cambio via `hookSpecificOutput.additionalContext` (JSON). También muestra errores resueltos.
 
 ### Remapeo de líneas (Edit)
 
@@ -189,20 +209,22 @@ El post-hook de Edit calcula el offset de líneas para comparar diagnósticos:
 - Para Write: no hay remapeo (archivo completamente nuevo)
 
 Archivos instalados:
-- `~/.claude/hooks/python-code-mcp-pre.py` (matcher: `Read`)
-- `~/.claude/hooks/python-code-mcp-post.py` (matcher: `Read`)
-- `~/.claude/hooks/python-code-mcp-pre-edit.py` (matcher: `Edit|Write`)
-- `~/.claude/hooks/python-code-mcp-post-edit.py` (matcher: `Edit|Write`)
+- `.claude/hooks/python-code-mcp-pre.py` (matcher: `Read`)
+- `.claude/hooks/python-code-mcp-post.py` (matcher: `Read`)
+- `.claude/hooks/python-code-mcp-pre-edit.py` (matcher: `Edit|Write`)
+- `.claude/hooks/python-code-mcp-post-edit.py` (matcher: `Edit|Write`)
 
 ### Lifespan
 
 El lifespan `ty_lifespan` ejecuta al inicio:
 
-1. Crea un `TyServer`, lo inicia y lo inicializa con el `rootUri` del `cwd`
-2. Precarga todos los archivos `.py` del proyecto via `didOpen` (respeta `.gitignore`)
-3. Setea las variables globales `_ty_server` y `_open_files`
-4. Yield de `{"ty": TyServer, "open_files": set[str]}`
-5. Al shutdown: detiene el subprocess de ty, limpia las variables globales
+1. Parsea `.gitignore` una vez (patterns reutilizados)
+2. Crea un `TyServer`, lo inicia y lo inicializa con el `rootUri` del `cwd`
+3. Precarga todos los archivos `.py` del proyecto via `didOpen` (respeta `.gitignore`)
+4. Construye el índice tree-sitter (`TreeSitterIndex.build()`) sobre los mismos archivos
+5. Setea las variables globales `_ty_server`, `_open_files` y `_ts_index`
+6. Yield de `{"ty": TyServer, "open_files": set[str], "ts_index": TreeSitterIndex}`
+7. Al shutdown: detiene el subprocess de ty, limpia las variables globales
 
 ### Flujo: `server.py` → `lsp.py`
 
@@ -211,16 +233,44 @@ El lifespan `ty_lifespan` ejecuta al inicio:
 3. Las tools usan `_ensure_file_open()` para validar el path y abrir archivos bajo demanda
 4. Las tools acceden al `TyServer` vía `ctx.lifespan_context["ty"]`
 5. Las rutas HTTP custom acceden al `TyServer` vía la variable global `_ty_server`
-6. `TyServer` maneja toda la comunicación LSP con ty via subprocess (stdin/stdout)
+6. `/lsp/reload` también actualiza el índice tree-sitter via `_ts_index.reindex_file()`
+7. `TyServer` maneja toda la comunicación LSP con ty via subprocess (stdin/stdout)
 
 ### Instalación (`install.py`)
 
 El comando `python-code-mcp install` ejecuta:
 
 1. Busca `claude` CLI en PATH (`shutil.which`)
-2. Registra el servidor: `claude mcp add -s user -t http python-code-mcp http://127.0.0.1:8000/mcp`
-3. Copia 4 hooks a `~/.claude/hooks/` (prefijo `python-code-mcp-`)
-4. Actualiza `~/.claude/settings.json` con 4 entradas de hooks (2 Read + 2 Edit|Write), preservando hooks existentes
+2. Registra el servidor: `claude mcp add -s project -t http python-code-mcp http://127.0.0.1:8000/mcp`
+3. Copia 4 hooks a `.claude/hooks/` del proyecto (prefijo `python-code-mcp-`)
+4. Actualiza `.claude/settings.json` del proyecto con 4 entradas de hooks (2 Read + 2 Edit|Write), preservando hooks existentes
+
+## TreeSitterIndex — Índice estructural tree-sitter
+
+### Implementación
+
+`src/ty_lsp/treesitter.py` contiene la clase `TreeSitterIndex` y funciones de extracción:
+
+- **Parser:** `tree_sitter.Parser` con gramática Python, cached como singleton
+- **APIs:** `tree-sitter-language-pack` (`process()`) para outline, `tree-sitter` de bajo nivel para extracción quirúrgica
+- **Índice:** `dict[str, list[SymbolLocation]]` — mapa nombre → ubicaciones, lookup O(1)
+- **Cache:** `dict[str, tree_sitter.Tree]` — árboles parseados cacheados por path
+
+### Funciones de extracción
+
+| Función | Descripción |
+|---|---|
+| `list_file_symbols(file_path, kind_filter?)` | Outline vía `process()` API de alto nivel |
+| `extract_function_body(file_path, name, class_name?)` | Código fuente exacto de una función via byte offsets |
+| `extract_class_skeleton(file_path, name)` | Estructura de clase: bases, firmas, docstrings, sin bodies |
+| `extract_enclosing(file_path, line)` | Unidad mínima que contiene una línea (0-indexed) |
+| `find_identifier_at(file_path, line, col)` | Encuentra el identifier más cercano a una posición (0-indexed) |
+
+### Posicionamiento
+
+- **Tools MCP:** `line` es **1-indexed** (natural para el LLM), `character`/`col` es **0-indexed** (estándar LSP)
+- **Interno (tree-sitter, ty):** todo **0-indexed** — las tools convierten antes de llamar
+- **Corrección automática:** `hover`, `find_definition`, `find_references` usan `find_identifier_at` para ajustar posiciones imprecisas
 
 ## TyServer — Cliente LSP para ty
 
