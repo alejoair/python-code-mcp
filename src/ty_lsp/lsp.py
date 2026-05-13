@@ -1,20 +1,38 @@
 """
-lsp.py — Cliente LSP para ty server.
+lsp.py — Clientes LSP para servidores de lenguaje Python.
 
-Maneja toda la comunicación con `ty server` via subprocess:
+Maneja la comunicación LSP via subprocess:
 - Transporte: stdio (stdin/stdout) con framing LSP (Content-Length)
 - Protocolo: JSON-RPC 2.0
+
+Clases:
+- LSPClient: clase base genérica para cualquier servidor LSP sobre stdio.
+- TyServer: cliente para el type checker ty (hover, diagnostics, definition, etc.).
+- RuffServer: cliente para ruff (formatting, linting, code actions).
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import sys
+from typing import ClassVar
 
 
-class TyServer:
-    """Cliente LSP para el servidor ty."""
+class LSPClient:
+    """Cliente LSP genérico sobre stdio (stdin/stdout).
 
-    def __init__(self) -> None:
+    Implementa el protocolo JSON-RPC 2.0 con framing Content-Length.
+    Las subclases deben sobrescribir ``initialize()`` con las capabilities
+    específicas del servidor.
+    """
+
+    # Prefijo para logs de stderr (sobrescribir en subclases)
+    _log_prefix: ClassVar[str] = "lsp"
+
+    def __init__(self, command: str, args: list[str]) -> None:
+        self._command = command
+        self._args = args
         self.process: asyncio.subprocess.Process | None = None
         self._msg_id = 0
         self._stderr_task: asyncio.Task | None = None
@@ -22,9 +40,10 @@ class TyServer:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        """Lanza `ty server` como subprocess."""
+        """Lanza el servidor LSP como subprocess."""
         self.process = await asyncio.create_subprocess_exec(
-            "ty", "server",
+            self._command,
+            *self._args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -32,16 +51,19 @@ class TyServer:
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
     async def _read_stderr(self) -> None:
-        """Lee stderr de ty y lo redirige a nuestro stderr."""
+        """Lee stderr del servidor y lo redirige a nuestro stderr."""
         assert self.process and self.process.stderr
         while True:
             line = await self.process.stderr.readline()
             if not line:
                 break
-            print(f"[ty stderr] {line.decode().rstrip()}", file=sys.stderr)
+            print(
+                f"[{self._log_prefix} stderr] {line.decode().rstrip()}",
+                file=sys.stderr,
+            )
 
     async def read_message(self) -> dict | None:
-        """Lee un mensaje LSP del stdout de ty (framing con Content-Length)."""
+        """Lee un mensaje LSP del stdout (framing con Content-Length)."""
         assert self.process and self.process.stdout
 
         # Leer headers hasta línea vacía
@@ -67,7 +89,7 @@ class TyServer:
         return json.loads(body_bytes)
 
     async def send(self, message: dict) -> None:
-        """Envía un mensaje JSON-RPC a ty via stdin con framing LSP."""
+        """Envía un mensaje JSON-RPC via stdin con framing LSP."""
         assert self.process and self.process.stdin
 
         body = json.dumps(message)
@@ -113,16 +135,16 @@ class TyServer:
             while True:
                 msg = await asyncio.wait_for(self.read_message(), timeout=timeout)
                 if msg is None:
-                    raise ConnectionError("ty cerró la conexión")
+                    raise ConnectionError(
+                        f"{self._log_prefix} cerró la conexión"
+                    )
                 if "id" in msg and msg["id"] == msg_id:
                     return msg
 
     async def initialize(self, root_uri: str) -> dict:
-        """Inicializa la comunicación LSP con ty.
+        """Inicializa la comunicación LSP.
 
-        Ejecuta los 2 pasos obligatorios:
-        1. initialize (request) — handshake con capabilities
-        2. initialized (notificación) — confirma la inicialización
+        Sobrescribir en subclases para personalizar capabilities.
         """
         resp = await self.send_and_wait("initialize", {
             "processId": None,
@@ -134,7 +156,7 @@ class TyServer:
         return resp
 
     async def open_file(self, file_uri: str, content: str, version: int = 1) -> None:
-        """Notifica a ty que un archivo está abierto."""
+        """Notifica que un archivo está abierto."""
         await self.send_notification("textDocument/didOpen", {
             "textDocument": {
                 "uri": file_uri,
@@ -145,17 +167,45 @@ class TyServer:
         })
 
     async def change_file(self, file_uri: str, content: str, version: int) -> None:
-        """Notifica a ty que el contenido de un archivo abierto ha cambiado."""
+        """Notifica que el contenido de un archivo abierto ha cambiado."""
         await self.send_notification("textDocument/didChange", {
             "textDocument": {"uri": file_uri, "version": version},
             "contentChanges": [{"text": content}],
         })
 
     async def close_file(self, file_uri: str) -> None:
-        """Notifica a ty que un archivo fue cerrado."""
+        """Notifica que un archivo fue cerrado."""
         await self.send_notification("textDocument/didClose", {
             "textDocument": {"uri": file_uri},
         })
+
+    async def stop(self) -> None:
+        """Detiene el servidor LSP."""
+        if self.process and self.process.returncode is None:
+            self.process.terminate()
+            await self.process.wait()
+            self.process = None
+            self._initialized = False
+
+
+class TyServer(LSPClient):
+    """Cliente LSP para el type checker ty."""
+
+    _log_prefix: ClassVar[str] = "ty"
+
+    def __init__(self) -> None:
+        super().__init__("ty", ["server"])
+
+    async def initialize(self, root_uri: str) -> dict:
+        """Inicializa ty con capabilities específicas."""
+        resp = await self.send_and_wait("initialize", {
+            "processId": None,
+            "rootUri": root_uri,
+            "capabilities": {},
+        })
+        await self.send_notification("initialized", {})
+        self._initialized = True
+        return resp
 
     async def hover(self, file_uri: str, line: int, character: int) -> dict | None:
         """Solicita hover info sobre una posición del archivo.
@@ -185,9 +235,6 @@ class TyServer:
         textDocument/publishDiagnostics con los diagnósticos de cada archivo.
         Este método lee todas las notificaciones pendientes y las agrupa por URI.
 
-        El motor de inferencia analiza el grafo de módulos completo, por lo que
-        cambios en un archivo se propagan a sus importadores.
-
         Returns:
             Dict de URI → lista de diagnósticos.
         """
@@ -209,9 +256,7 @@ class TyServer:
             return all_diags
 
     async def diagnostic(self, file_uri: str) -> list[dict]:
-        """Solicita diagnósticos (type check) para un archivo.
-
-        Usa el modelo pull: textDocument/diagnostic.
+        """Solicita diagnósticos (type check) para un archivo (pull model).
 
         Args:
             file_uri: URI del archivo.
@@ -226,7 +271,6 @@ class TyServer:
         result = resp.get("result")
         if result is None:
             return []
-        # El resultado puede ser RelatedFullDocumentDiagnosticReport o similar
         items = result.get("items", [])
         return items
 
@@ -241,7 +285,7 @@ class TyServer:
             character: Columna (0-indexed).
 
         Returns:
-            Lista de locaciones (each with uri, range).
+            Lista de locaciones.
         """
         resp = await self.send_and_wait("textDocument/definition", {
             "textDocument": {"uri": file_uri},
@@ -251,10 +295,8 @@ class TyServer:
         result = resp.get("result")
         if result is None:
             return []
-        # result puede ser un Location[] o LocationLink[]
         if isinstance(result, list):
             return result
-        # LocationLink (raro, pero defensivo)
         return [result]
 
     async def references(
@@ -306,10 +348,151 @@ class TyServer:
             return None
         return result
 
-    async def stop(self) -> None:
-        """Detiene el servidor ty."""
-        if self.process and self.process.returncode is None:
-            self.process.terminate()
-            await self.process.wait()
-            self.process = None
-            self._initialized = False
+
+class RuffServer(LSPClient):
+    """Cliente LSP para ruff (linter + formatter)."""
+
+    _log_prefix: ClassVar[str] = "ruff"
+
+    def __init__(self) -> None:
+        super().__init__("ruff", ["server"])
+
+    async def initialize(self, root_uri: str) -> dict:
+        """Inicializa ruff con capabilities específicas."""
+        resp = await self.send_and_wait("initialize", {
+            "processId": None,
+            "rootUri": root_uri,
+            "capabilities": {
+                "textDocument": {
+                    "publishDiagnostics": {
+                        "relatedInformation": True,
+                        "tagSupport": {"valueSet": [1, 2]},
+                        "versionSupport": True,
+                    },
+                    "formatting": {"dynamicRegistration": False},
+                    "codeAction": {
+                        "dynamicRegistration": False,
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "quickfix",
+                                    "source.fixAll",
+                                    "source.organizeImports",
+                                ]
+                            }
+                        },
+                    },
+                },
+            },
+        })
+        await self.send_notification("initialized", {})
+        self._initialized = True
+        return resp
+
+    async def format_file(self, file_uri: str) -> list[dict]:
+        """Formatea un archivo con ruff.
+
+        Args:
+            file_uri: URI del archivo.
+
+        Returns:
+            Lista de TextEdit con los cambios de formato.
+        """
+        resp = await self.send_and_wait("textDocument/formatting", {
+            "textDocument": {"uri": file_uri},
+            "options": {"tabSize": 4, "insertSpaces": True},
+        })
+
+        result = resp.get("result")
+        if result is None:
+            return []
+        return result
+
+    async def diagnostic(self, file_uri: str) -> list[dict]:
+        """Solicita diagnósticos de lint para un archivo (pull model).
+
+        Args:
+            file_uri: URI del archivo.
+
+        Returns:
+            Lista de diagnósticos de lint.
+        """
+        resp = await self.send_and_wait("textDocument/diagnostic", {
+            "textDocument": {"uri": file_uri},
+        })
+
+        result = resp.get("result")
+        if result is None:
+            return []
+        items = result.get("items", [])
+        return items
+
+    async def code_actions(
+        self,
+        file_uri: str,
+        start_line: int,
+        start_char: int,
+        end_line: int,
+        end_char: int,
+        *,
+        only: list[str] | None = None,
+    ) -> list[dict]:
+        """Solicita code actions para un rango del archivo.
+
+        Args:
+            file_uri: URI del archivo.
+            start_line: Línea inicio (0-indexed).
+            start_char: Columna inicio (0-indexed).
+            end_line: Línea fin (0-indexed).
+            end_char: Columna fin (0-indexed).
+            only: Filtrar por kinds (ej: ["quickfix", "source.fixAll"]).
+
+        Returns:
+            Lista de CodeAction o Command.
+        """
+        params: dict = {
+            "textDocument": {"uri": file_uri},
+            "range": {
+                "start": {"line": start_line, "character": start_char},
+                "end": {"line": end_line, "character": end_char},
+            },
+            "context": {"diagnostics": []},
+        }
+        if only:
+            params["context"]["only"] = only
+
+        resp = await self.send_and_wait("textDocument/codeAction", params)
+
+        result = resp.get("result")
+        if result is None:
+            return []
+        return result
+
+    async def collect_push_diagnostics(
+        self, *, timeout: float = 3.0
+    ) -> dict[str, list[dict]]:
+        """Recolecta diagnósticos push (publishDiagnostics) pendientes.
+
+        Ruff envía publishDiagnostics tras didOpen/didChange.
+        Este método los drena y agrupa por URI.
+
+        Returns:
+            Dict de URI → lista de diagnósticos.
+        """
+        async with self._lock:
+            all_diags: dict[str, list[dict]] = {}
+            for _ in range(100):
+                try:
+                    msg = await asyncio.wait_for(
+                        self.read_message(), timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    break
+                if msg is None:
+                    break
+                if msg.get("method") == "textDocument/publishDiagnostics":
+                    params = msg.get("params", {})
+                    uri = params.get("uri", "")
+                    diags = params.get("diagnostics", [])
+                    all_diags[uri] = diags
+            return all_diags

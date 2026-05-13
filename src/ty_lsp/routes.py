@@ -5,13 +5,13 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ty_lsp.app import mcp, open_files, ts_index, ty_server
+from ty_lsp.app import mcp, open_files, ruff_server, ts_index, ty_server
 from ty_lsp.ast_extract import extract_symbols
 
 
 @mcp.custom_route("/lsp/open", methods=["POST"])
 async def lsp_open(request: Request) -> JSONResponse:
-    """Abre un archivo .py en ty (warm-up para hooks PreToolUse)."""
+    """Abre un archivo .py en ty y ruff (warm-up para hooks PreToolUse)."""
     if ty_server is None:
         return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
 
@@ -30,6 +30,8 @@ async def lsp_open(request: Request) -> JSONResponse:
     if file_uri not in open_files:
         content = path.read_text(encoding="utf-8")
         await ty_server.open_file(file_uri, content)
+        if ruff_server is not None:
+            await ruff_server.open_file(file_uri, content)
         open_files[file_uri] = 1
 
     return JSONResponse({"ok": True})
@@ -37,7 +39,7 @@ async def lsp_open(request: Request) -> JSONResponse:
 
 @mcp.custom_route("/lsp/file-info", methods=["POST"])
 async def lsp_file_info(request: Request) -> JSONResponse:
-    """Retorna diagnósticos de tipo y símbolos de un archivo .py."""
+    """Retorna diagnósticos de tipo (ty) y símbolos de un archivo .py."""
     if ty_server is None:
         return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
 
@@ -57,6 +59,8 @@ async def lsp_file_info(request: Request) -> JSONResponse:
 
     if file_uri not in open_files:
         await ty_server.open_file(file_uri, content)
+        if ruff_server is not None:
+            await ruff_server.open_file(file_uri, content)
         open_files[file_uri] = 1
 
     raw_diags = await ty_server.diagnostic(file_uri)
@@ -78,7 +82,7 @@ async def lsp_file_info(request: Request) -> JSONResponse:
 
 @mcp.custom_route("/lsp/reload", methods=["POST"])
 async def lsp_reload(request: Request) -> JSONResponse:
-    """Recarga un .py en ty post-edición (didChange + didOpen fallback)."""
+    """Recarga un .py en ty y ruff post-edición (didChange + didOpen fallback)."""
     if ty_server is None:
         return JSONResponse({"error": "servidor no inicializado"}, status_code=503)
 
@@ -99,9 +103,13 @@ async def lsp_reload(request: Request) -> JSONResponse:
     if file_uri in open_files:
         version = open_files[file_uri] + 1
         await ty_server.change_file(file_uri, content, version)
+        if ruff_server is not None:
+            await ruff_server.change_file(file_uri, content, version)
         open_files[file_uri] = version
     else:
         await ty_server.open_file(file_uri, content)
+        if ruff_server is not None:
+            await ruff_server.open_file(file_uri, content)
         open_files[file_uri] = 1
 
     if ts_index is not None:
