@@ -120,14 +120,15 @@ python-code-mcp install    → registra el servidor en Claude Code y sale
 | `src/ty_lsp/lsp_helpers.py` | `format_location()`, `uri_to_path()` | Formateo de respuestas LSP (Location → texto legible, URI → path) |
 | `src/ty_lsp/ast_extract.py` | `extract_symbols()` | Extracción de símbolos con `ast` (clases y funciones, 2 niveles) |
 | `src/ty_lsp/routes.py` | — | Rutas HTTP custom (`/lsp/open`, `/lsp/file-info`, `/lsp/reload`, `/lsp/workspace-diff`) |
-| `src/ty_lsp/tools_lsp.py` | — | Tools MCP semánticas (ty LSP): `hover`, `type_check`, `workspace_check`, `find_definition`, `find_references` |
+| `src/ty_lsp/tools_lsp.py` | — | Tools MCP semánticas (ty LSP): `hover`, `type_check`, `workspace_check`, `find_definition`, `find_references`, `restart_servers` |
 | `src/ty_lsp/tools_treesitter.py` | — | Tools MCP estructurales (tree-sitter): `list_symbols`, `get_function_body`, `get_class_skeleton`, `extract_enclosing_unit` |
 | `src/ty_lsp/tools_search.py` | `PyTreeContext`, `search_code()` | Tool MCP de búsqueda con contexto sintáctico (grep-ast + tree-sitter) |
 | `src/ty_lsp/install.py` | `run_install()`, `find_claude_cli()` | Lógica de instalación (`claude mcp add`) + registro de hooks |
 | `src/ty_lsp/hooks/pre_tool_use.py` | — | Hook PreToolUse: envía POST a `/lsp/open` para calentar ty |
 | `src/ty_lsp/hooks/post_tool_use.py` | — | Hook PostToolUse: consulta `/lsp/file-info` e imprime diagnósticos y símbolos |
 | `src/ty_lsp/hooks/pre_tool_use_edit.py` | — | Hook PreToolUse Edit/Write: captura diagnósticos + workspace diagnostics en snapshot temporal |
-| `src/ty_lsp/hooks/post_tool_use_edit.py` | — | Hook PostToolUse Edit/Write: compara antes/después con remapeo de líneas + impacto cross-file |
+| `src/ty_lsp/hooks/post_tool_use_edit.py` | — | Hook PostToolUse Edit/Write: compara antes/después con remapeo de líneas + impacto cross-file + bloqueo configurable |
+| `src/ty_lsp/hooks/hook_config.py` | `HookConfig` | Lectura de configuración de bloqueo desde `[tool.python-code-mcp.hooks]` en pyproject.toml |
 | `src/ty_lsp/testmod/` | — | Módulo de prueba con imports cruzados para testing LSP multi-archivo |
 
 ### Entry point (`pyproject.toml`)
@@ -149,7 +150,7 @@ Variables globales usadas por las rutas HTTP custom (fuera del contexto MCP):
 
 El lifespan en `server.py` setea estas variables al inicio y las limpia al shutdown.
 
-### Tools MCP expuestas (9 tools)
+### Tools MCP expuestas (10 tools)
 
 **Tools semánticas (ty LSP):**
 
@@ -160,6 +161,7 @@ El lifespan en `server.py` setea estas variables al inicio y las limpia al shutd
 | `workspace_check` | — | Diagnósticos de todo el workspace usando inferencia de módulo completo de ty |
 | `find_definition` | `file_path`, `line`, `col` | Ubicación de la definición de un símbolo. Línea 1-indexed. |
 | `find_references` | `file_path`, `line`, `col` | Todas las referencias a un símbolo en el workspace. Línea 1-indexed. |
+| `restart_servers` | — | Reinicia ty + ruff LSP servers para recargar config de pyproject.toml sin reiniciar el MCP server. |
 
 > **Nota:** Las tools `hover`, `find_definition` y `find_references` usan tree-sitter (`find_identifier_at`) para corregir posiciones imprecisas automáticamente — si no hay info en la posición exacta, buscan el identifier más cercano y reintentan.
 
@@ -189,6 +191,7 @@ Además de las tools MCP, el servidor expone cuatro endpoints HTTP para los hook
 | `/lsp/open` | POST | Abre un `.py` en ty (calentamiento para hook PreToolUse) |
 | `/lsp/file-info` | POST | Retorna diagnósticos de tipo y símbolos AST para un `.py` |
 | `/lsp/reload` | POST | Recarga un `.py` en ty post-edición (didChange + didOpen fallback) |
+| `/lsp/check-hypothetical` | POST | Diagnostica contenido simulado sin persistirlo (didChange + diagnostic + restaurar). Usado por pre-hook para bloqueo preventivo. |
 | `/lsp/workspace-diff` | POST | Diagnósticos de todos los archivos abiertos agrupados por URI (pull model) |
 
 Las rutas importan `ty_server`, `open_files` y `ts_index` desde `app.py` (no usan el contexto lifespan, ya que son endpoints HTTP fuera del contexto MCP tool).
@@ -204,8 +207,8 @@ Los hooks se instalan durante `python-code-mcp install` y se integran con Claude
 
 **Hooks para Edit/Write:**
 
-3. **PreToolUse** (`pre_tool_use_edit.py`): Antes de editar/escribir un `.py`, captura diagnósticos actuales, contenido del archivo y diagnósticos del workspace completo (`/lsp/workspace-diff`) en un snapshot temporal (`$TEMP/ty-edit-{sha256[:16]}.json`). No imprime nada (silencioso).
-4. **PostToolUse** (`post_tool_use_edit.py`): Tras editar/escribir un `.py`, recarga el archivo en ty via `/lsp/reload`, compara diagnósticos antes/después con remapeo de líneas, y muestra solo los errores NUEVOS introducidos por el cambio via `hookSpecificOutput.additionalContext` (JSON). También muestra errores resueltos y realiza análisis de impacto cross-file (nuevos errores en otros archivos del workspace).
+3. **PreToolUse** (`pre_tool_use_edit.py`): Antes de editar/escribir un `.py`, captura diagnósticos actuales y contenido en un snapshot temporal. Si el bloqueo está activo (`block-mode != "off"`), simula el cambio (`before_content.replace(old_string, new_string)` para Edit, `content` para Write), lo envía a ty via `/lsp/check-hypothetical`, compara diagnósticos antes/después, y si hay errores nuevos que coinciden con la configuración → retorna `{"decision": "block", "reason": "..."}` para **prevenir** que el cambio se aplique. Si no hay bloqueo o no hay errores → silencioso (no imprime nada).
+4. **PostToolUse** (`post_tool_use_edit.py`): Tras editar/escribir un `.py`, recarga el archivo en ty via `/lsp/reload`, compara diagnósticos antes/después con remapeo de líneas, y muestra solo los errores NUEVOS introducidos por el cambio via `hookSpecificOutput.additionalContext` (JSON). También muestra errores resueltos y realiza análisis de impacto cross-file. Es puramente informativo — nunca bloquea.
 
 ### Remapeo de líneas (Edit)
 
@@ -215,6 +218,44 @@ El post-hook de Edit calcula el offset de líneas para comparar diagnósticos:
 - `delta` = `new_string.lines - old_string.lines`
 - Diagnósticos "before" con `line > start_line + old_count` se ajustan: `line += delta`
 - Para Write: no hay remapeo (archivo completamente nuevo)
+
+### Configuración de bloqueo de Hooks
+
+Los hooks de Edit/Write pueden **bloquear** cambios que introduzcan errores nuevos, según la configuración en `[tool.python-code-mcp.hooks]` en `pyproject.toml`:
+
+```toml
+[tool.python-code-mcp.hooks]
+block-mode = "off"          # "off" | "ty" | "ruff" | "all"
+block-severity = 1           # 1=Error, 2=Warning, 3=Info
+block-rules = []             # Whitelist de códigos. Vacío = todas.
+block-cross-file = true      # Incluir impacto cross-file
+```
+
+| Parámetro | Tipo | Default | Descripción |
+|---|---|---|---|
+| `block-mode` | `string` | `"off"` | `"off"` = solo reportar, `"ty"` = bloquear por type errors, `"ruff"` = bloquear por lint errors, `"all"` = ambos |
+| `block-severity` | `int` | `1` | Severidad mínima para bloquear: `1`=Error, `2`=Warning, `3`=Info |
+| `block-rules` | `list[string]` | `[]` | Lista blanca de códigos de regla que bloquean. Vacío = todas las reglas con severidad suficiente bloquean. Ejemplos ty: `"unresolved-import"`, `"invalid-assignment"`. Ejemplos ruff: `"F401"`, `"F841"`. |
+| `block-cross-file` | `bool` | `true` | Incluir errores nuevos en otros archivos del workspace como razón de bloqueo |
+
+**Flujo de bloqueo (en el PRE-hook):**
+
+1. El pre-hook (`pre_tool_use_edit.py`) lee la config de `[tool.python-code-mcp.hooks]`.
+2. Si `block-mode != "off"`: simula el cambio en memoria, lo envía a `/lsp/check-hypothetical`.
+3. Compara diagnósticos del contenido hipotético vs diagnósticos actuales del archivo.
+4. Filtra los errores nuevos con `HookConfig.filter_blocking()`.
+5. Si hay errores que bloquean → retorna `{"decision": "block", "reason": "..."}` y Claude **nunca aplica** el cambio.
+6. Si no hay errores que bloquean → el cambio procede normalmente, y el post-hook reporta info adicional.
+
+**Ejemplo: bloquear solo imports no resueltos y variables no usadas:**
+
+```toml
+[tool.python-code-mcp.hooks]
+block-mode = "all"
+block-severity = 1
+block-rules = ["unresolved-import", "unresolved-reference", "F401", "F841"]
+block-cross-file = true
+```
 
 Archivos instalados:
 - `.claude/hooks/python-code-mcp-pre.py` (matcher: `Read`)
@@ -303,3 +344,112 @@ El comando `python-code-mcp install` ejecuta:
 - ty envía `publishDiagnostics` como push tras didOpen; `send_and_wait` las descarta automáticamente
 - Para actualizar contenido: `didChange` o didOpen con nueva versión
 - `workspace_diagnostic()` recolecta diagnósticos push de todo el workspace (drain de hasta 500 mensajes con timeout de 5s cada uno)
+
+## Project Context (Auto-generated)
+
+> **Nota**: Esta sección se genera automáticamente antes de cada query.
+> No la edites manualmente ya que se sobrescribirá.
+>
+> Providers activos: generate_system_context, generate_extended_system_context, generate_filetree_context, generate_stats_context, generate_git_context, generate_git_status_context
+
+### System Info
+
+- **OS**: 🪟 Windows 11 (AMD64)
+- **User**: `alejandro.cuartas@CO-IT026150`
+- **Home**: `C:\Users\alejandro.cuartas`
+- **Shell**: `C:\WINDOWS\system32\cmd.exe`
+- **Python**: `3.12.0` → `C:\Users\alejandro.cuartas\AppData\Local\Programs\Python\Python312\python.exe`
+- **Date/Time**: 2026-05-14 09:28:21 (SA Pacific Standard Time)
+- **Unix Timestamp**: `1778768901`
+
+
+
+### Extended System Info
+
+- **LANG**: `unknown`
+- **TERM**: `unknown`
+- **PATH**:
+  ```
+  C:\windows\system32;C:\windows;C:\windows\System32\Wbem;C:\windows\System32\WindowsPowerShell\v1.0\;C:\windows\System32\OpenSSH\;
+  ... C:\Users\alejandro.cuartas\AppData\Local\Globant\Coda\CodingAgent\bin;C:\Users\alejandro.cuartas\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe;
+  ```
+
+
+
+### File Tree
+
+```
+python-code-mcp/
+├── .github/
+│   └── workflows/
+│       └── publish.yml
+├── src/
+│   └── ty_lsp/
+│       ├── hooks/
+│       │   ├── __init__.py
+│       │   ├── hook_config.py
+│       │   ├── post_tool_use.py
+│       │   ├── post_tool_use_edit.py
+│       │   ├── pre_tool_use.py
+│       │   └── pre_tool_use_edit.py
+│       ├── testmod/
+│       │   ├── __init__.py
+│       │   ├── main.py
+│       │   ├── models.py
+│       │   ├── service.py
+│       │   └── utils.py
+│       ├── __init__.py
+│       ├── app.py
+│       ├── ast_extract.py
+│       ├── gitignore.py
+│       ├── install.py
+│       ├── lsp.py
+│       ├── lsp_helpers.py
+│       ├── routes.py
+│       ├── server.py
+│       ├── tools_lsp.py
+│       ├── tools_ruff.py
+│       ├── tools_search.py
+│       ├── tools_treesitter.py
+│       ├── treesitter.py
+│       └── validation.py
+├── .gitignore
+├── CLAUDE.md
+├── pyproject.toml
+├── sample.py
+├── SYSTEM_PROMPT.md
+├── test_flow.py
+├── test_hook.py
+├── ty_client.py
+└── ty_server.py
+```
+
+### Project Stats
+
+- **Python files**: 35
+- **JS/TS files**: 0
+- **Total tracked files**: 35
+
+### Git Info
+
+- **Branch**: `main`
+  - f54e522 Add Ruff LSP integration for linting, formatting, and code actions
+  - 611b65c Refactor into modular architecture and update CLAUDE.md
+  - 7029efb Add workspace-level diagnostics with cross-file impact detection
+
+### Git Status
+
+```
+  M .mcp.json
+   M CLAUDE.md
+   M pyproject.toml
+   M src/ty_lsp/app.py
+   M src/ty_lsp/hooks/post_tool_use_edit.py
+   M src/ty_lsp/hooks/pre_tool_use_edit.py
+   M src/ty_lsp/routes.py
+   M src/ty_lsp/server.py
+   M src/ty_lsp/tools_lsp.py
+  ?? src/ty_lsp/hooks/hook_config.py
+```
+
+---

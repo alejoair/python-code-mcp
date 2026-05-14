@@ -1,8 +1,9 @@
 [project]
 name = "python-code-mcp"
-version = "0.2.1"
+version = "0.2.2"
 requires-python = ">=3.11"
 dependencies = [
+    "mcp>=1.9.4",
     "fastmcp==3.2.4",
     "httpx>=0.27",
     "tree-sitter-language-pack==1.8.0",
@@ -19,7 +20,66 @@ dependencies = [
 python-code-mcp = "ty_lsp.server:main"
 
 [tool.ty.environment]
-extra-paths = ["C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\site-packages"]
+python-version = "3.12"
+
+[tool.ty.rules]
+possibly-unresolved-reference = "warn"
+unresolved-reference = "error"
+unresolved-import = "error"
+invalid-assignment = "error"
+invalid-return-type = "error"
+invalid-argument-type = "error"
+missing-argument = "error"
+too-many-positional-arguments = "error"
+not-callable = "error"
+unsupported-operator = "error"
+unresolved-attribute = "error"
+division-by-zero = "warn"
+possibly-unbound-attribute = "warn"
+unnecessary-type-ignore-comment = "warn"
+conflicting-declarations = "error"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "F",      # Pyflakes: imports/variables no usados, redefiniciones
+    "E",      # pycodestyle errors: estilo PEP 8
+    "W",      # pycodestyle warnings
+    "I",      # isort: orden de imports
+    "N",      # pep8-naming: convenciones de naming
+    "UP",     # pyupgrade: sintaxis moderna
+    "B",      # flake8-bugbear: bugs comunes (mutable defaults, etc.)
+    "A",      # flake8-builtins: shadowing de builtins
+    "C4",     # flake8-comprehensions: comprehensions simplificables
+    "SIM",    # flake8-simplify: simplificaciones de código
+    "TCH",    # flake8-type-checking: imports solo para type hints
+    "ARG",    # flake8-unused-arguments: args no usados
+    "PTH",    # flake8-use-pathlib: os.path → pathlib
+    "RUF",    # Ruff nativas
+    "S",      # flake8-bandit: seguridad (eval, hardcoded passwords)
+    "T20",    # flake8-print: print() en producción
+    "PERF",   # Perflint: patrones de performance
+    "RET",    # flake8-return: returns innecesarios
+    "PL",     # Pylint subset: complejidad, convenciones
+]
+ignore = [
+    "S101",   # assert — válido en tests y validación interna
+    "T201",   # print — este proyecto usa print en hooks
+    "PLR09",  # too-many-* — límites de complejidad demasiado estrictos
+    "ARG001", # unused first argument — común en handlers/hooks
+    "ARG002", # unused method argument — común en overrides
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ty_lsp"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ty_lsp"]
@@ -27,3 +87,24 @@ packages = ["src/ty_lsp"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# ── Hook blocking configuration ──────────────────────────────────────
+# Controls how the Edit/Write post-hooks respond to new diagnostics.
+#
+# [tool.python-code-mcp.hooks]
+# block-mode = "off"          # "off" | "ty" | "ruff" | "all"
+#                              #   off  = only report (never block)
+#                              #   ty   = block on new ty type errors
+#                              #   ruff = block on new ruff lint errors
+#                              #   all  = block on either
+# block-severity = 1           # Minimum severity to block: 1=Error, 2=Warning, 3=Info
+# block-rules = []             # Whitelist of rule codes that block. Empty = all rules.
+#                              #   ty examples: "unresolved-import", "invalid-assignment"
+#                              #   ruff examples: "F401", "F841", "E501"
+# block-cross-file = true      # Include cross-file impact in blocking decision
+#
+[tool.python-code-mcp.hooks]
+block-mode = "all"
+block-severity = 2
+block-rules = []
+block-cross-file = true

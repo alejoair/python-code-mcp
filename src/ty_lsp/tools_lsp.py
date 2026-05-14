@@ -1,9 +1,14 @@
 """Tools MCP semánticas basadas en ty LSP."""
 
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 from fastmcp import Context  # type: ignore[import-unresolved]
 
 from ty_lsp.app import mcp
-from ty_lsp.lsp import TyServer
+from ty_lsp.lsp import RuffServer, TyServer
 from ty_lsp.lsp_helpers import format_location, uri_to_path
 from ty_lsp.treesitter import find_identifier_at
 from ty_lsp.validation import FileError, ensure_file_open
@@ -227,3 +232,77 @@ async def find_references(
 
     result_lines = [format_location(loc) for loc in locations]
     return "\n".join(result_lines)
+
+
+@mcp.tool
+async def restart_servers(ctx: Context) -> str:
+    """Restart the ty and ruff LSP servers to pick up configuration changes.
+
+    Use this after editing pyproject.toml to apply new ty rules or ruff
+    lint settings without restarting the entire MCP server.
+
+    Stops both LSP subprocesses, restarts them, re-opens all project files,
+    and prints the updated configuration from pyproject.toml.
+    """
+    from ty_lsp.app import _print_configured_rules
+    from ty_lsp.treesitter import TreeSitterIndex
+    from ty_lsp.validation import open_project_files, parse_gitignore
+
+    import ty_lsp.app as app
+
+    old_ty: TyServer = ctx.lifespan_context["ty"]
+    old_ruff: RuffServer = ctx.lifespan_context["ruff"]
+
+    # Stop old servers
+    print("[python-code-mcp] Deteniendo servidores...", file=sys.stderr)
+    await old_ruff.stop()
+    await old_ty.stop()
+
+    # Start fresh servers
+    root_path = Path.cwd()
+    root_uri = root_path.as_uri()
+    patterns = parse_gitignore(root_path)
+
+    ty = TyServer()
+    await ty.start()
+    await ty.initialize(root_uri)
+
+    open_files = await open_project_files(ty, root_path, patterns)
+
+    ruff = RuffServer()
+    await ruff.start()
+    await ruff.initialize(root_uri)
+
+    for uri in open_files:
+        file_path_str = uri_to_path(uri)
+        try:
+            content = Path(file_path_str).read_text(encoding="utf-8")
+            await ruff.open_file(uri, content)
+        except OSError:
+            pass
+
+    ts_index = TreeSitterIndex()
+    ts_index.build(root_path, patterns)
+
+    # Update global state
+    app.ty_server = ty
+    app.ruff_server = ruff
+    app.open_files = open_files
+    app.ts_index = ts_index
+
+    # Update lifespan context (so subsequent tool calls use the new servers)
+    ctx.lifespan_context["ty"] = ty
+    ctx.lifespan_context["ruff"] = ruff
+    ctx.lifespan_context["open_files"] = open_files
+    ctx.lifespan_context["ts_index"] = ts_index
+
+    # Print updated config
+    _print_configured_rules(root_path)
+
+    return (
+        f"Servidores reiniciados correctamente.\n"
+        f"  ty: {len(open_files)} archivo(s) abiertos\n"
+        f"  ruff: {len(open_files)} archivo(s) abiertos\n"
+        f"  tree-sitter: índice reconstruido\n"
+        f"  Configuración recargada desde pyproject.toml"
+    )
