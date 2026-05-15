@@ -29,6 +29,7 @@ def _install_hooks() -> None:
         ("pre_tool_use.py", "python-code-mcp-pre.py"),
         ("post_tool_use.py", "python-code-mcp-post.py"),
         ("pre_tool_use_edit.py", "python-code-mcp-pre-edit.py"),
+        ("post_tool_use_edit.py", "python-code-mcp-post-edit.py"),
     ]:
         src = hooks_src / src_name
         dst = hooks_dst / dst_name
@@ -50,10 +51,16 @@ def _install_hooks() -> None:
     }
 
     edit_pre_cmd = f"python {hooks_dir_posix}/python-code-mcp-pre-edit.py"
+    edit_post_cmd = f"python {hooks_dir_posix}/python-code-mcp-post-edit.py"
 
     new_edit_pre_entry = {
         "matcher": "Edit|Write",
         "hooks": [{"type": "command", "command": edit_pre_cmd}],
+    }
+
+    new_edit_post_entry = {
+        "matcher": "Edit|Write",
+        "hooks": [{"type": "command", "command": edit_post_cmd}],
     }
 
     # Leer/crear .claude/settings.json del proyecto
@@ -80,6 +87,7 @@ def _install_hooks() -> None:
         if not _is_our_hook(e)
     ]
     post_entries.append(new_post_entry)
+    post_entries.append(new_edit_post_entry)
     hooks["PostToolUse"] = post_entries
 
     settings_path.write_text(

@@ -27,8 +27,8 @@ async def lsp_open(request: Request) -> JSONResponse:
     file_path = body.get("file_path", "")
     path = Path(file_path).resolve()
 
-    if not path.exists() or path.suffix != ".py":
-        return JSONResponse({"error": f"archivo inválido: {file_path}"}, status_code=400)
+    if not path.exists() or path.suffix != ".py" or not _is_project_file(path):
+        return JSONResponse({"ok": True})
 
     file_uri = path.as_uri()
     if file_uri not in app.open_files:
@@ -57,6 +57,9 @@ async def lsp_file_info(request: Request) -> JSONResponse:
 
     if not path.exists() or path.suffix != ".py":
         return JSONResponse({"error": f"archivo inválido: {file_path}"}, status_code=400)
+
+    if not _is_project_file(path):
+        return JSONResponse({"diagnostics": [], "symbols": []})
 
     file_uri = path.as_uri()
     content = path.read_text(encoding="utf-8")
@@ -113,6 +116,16 @@ async def lsp_reload(request: Request) -> JSONResponse:
         app.ts_index.reindex_file(str(path))
 
     return JSONResponse({"ok": True})
+
+
+def _is_project_file(path: Path) -> bool:
+    """Check if a file is inside the project root (cwd) and not in .claude/."""
+    try:
+        rel = path.relative_to(Path.cwd())
+    except ValueError:
+        return False
+    parts = rel.parts
+    return ".claude" not in parts
 
 
 def _simplify_diags(raw_diags: list[dict], source: str = "ty") -> list[dict]:

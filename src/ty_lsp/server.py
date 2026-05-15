@@ -13,6 +13,7 @@ import ty_lsp.tools_lsp  # noqa: F401
 import ty_lsp.tools_ruff  # noqa: F401
 import ty_lsp.tools_search  # noqa: F401
 import ty_lsp.tools_treesitter  # noqa: F401
+import ty_lsp.tools_overview  # noqa: F401
 import ty_lsp.routes  # noqa: F401
 
 
