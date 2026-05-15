@@ -54,15 +54,16 @@ class HookConfig:
         """True si el bloqueo está activado (cualquier modo que no sea 'off')."""
         return self.block_mode != "off"
 
-    def should_block_diag(self, diag: dict, source: str = "ty") -> bool:
+    def should_block_diag(self, diag: dict) -> bool:
         """Determina si un diagnóstico individual debe causar bloqueo.
 
-        Args:
-            diag: Diagnóstico con severity, code, message.
-            source: "ty" o "ruff" — para filtrar por block-mode.
+        Lee el campo 'source' del diagnóstico ("ty" o "ruff") para
+        filtrar según block_mode.
         """
         if not self.blocking_enabled:
             return False
+
+        source = diag.get("source", "ty")
 
         # Filtrar por source según block_mode
         if self.block_mode == "ty" and source != "ty":
@@ -84,6 +85,6 @@ class HookConfig:
 
         return True
 
-    def filter_blocking(self, diags: list[dict], source: str = "ty") -> list[dict]:
+    def filter_blocking(self, diags: list[dict]) -> list[dict]:
         """Filtra una lista de diagnósticos, retornando solo los que bloquean."""
-        return [d for d in diags if self.should_block_diag(d, source)]
+        return [d for d in diags if self.should_block_diag(d)]

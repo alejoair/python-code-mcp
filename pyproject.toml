@@ -89,7 +89,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # ── Hook blocking configuration ──────────────────────────────────────
-# Controls how the Edit/Write post-hooks respond to new diagnostics.
+# Controls how the Edit/Write pre-hook responds to new diagnostics.
 #
 # [tool.python-code-mcp.hooks]
 # block-mode = "off"          # "off" | "ty" | "ruff" | "all"
@@ -105,6 +105,6 @@ build-backend = "hatchling.build"
 #
 [tool.python-code-mcp.hooks]
 block-mode = "all"
-block-severity = 2
+block-severity = 1
 block-rules = []
 block-cross-file = true

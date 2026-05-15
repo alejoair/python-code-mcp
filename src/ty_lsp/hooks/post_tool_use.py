@@ -9,9 +9,10 @@ Claude lo vea como contexto adicional.
 import json
 import os
 import sys
+from typing import cast
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.stdout.reconfigure(encoding="utf-8")
+cast("io.TextIOWrapper", sys.stdout).reconfigure(encoding="utf-8")
 
 try:
     import httpx

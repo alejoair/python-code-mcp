@@ -142,7 +142,7 @@ async def apply_code_action(
         edit = action.get("edit")
         if edit:
             changes = edit.get("changes", {})
-            for _uri, text_edits in changes.items():
+            for text_edits in changes.values():
                 for te in text_edits:
                     r = te.get("range", {})
                     s = r.get("start", {})

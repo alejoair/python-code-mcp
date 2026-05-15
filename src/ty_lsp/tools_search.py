@@ -45,7 +45,7 @@ class PyTreeContext(_TreeContext):
         self.output_lines: dict[int, str] = {}
         self.scopes: list[set[int]] = [set() for _ in range(self.num_lines)]
         self.header: list[list[tuple[int, ...]]] = [
-            list() for _ in range(self.num_lines)
+            [] for _ in range(self.num_lines)  # type: ignore[list-item]
         ]
         self.nodes: list[list[object]] = [list() for _ in range(self.num_lines)]
 
@@ -60,7 +60,7 @@ class PyTreeContext(_TreeContext):
             else:
                 head_start = i
                 head_end = i + 1
-            self.header[i] = head_start, head_end
+            self.header[i] = [(head_start, head_end)]
 
         self.show_lines: set[int] = set()
         self.lines_of_interest: set[int] = set()

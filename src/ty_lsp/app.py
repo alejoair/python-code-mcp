@@ -169,3 +169,6 @@ ty_server: TyServer | None = None
 ruff_server: RuffServer | None = None
 open_files: dict[str, int] = {}
 ts_index: TreeSitterIndex | None = None
+
+# Override runtime del bloqueo (None = usar pyproject.toml, dict = override)
+block_mode_override: dict | None = None

@@ -19,6 +19,35 @@ import sys
 from typing import ClassVar
 
 
+def _print_capabilities(name: str, init_response: dict) -> None:
+    """Imprime las capabilities del servidor reportadas en la respuesta initialize."""
+    result = init_response.get("result", {})
+    caps = result.get("capabilities", {})
+    if not caps:
+        print(f"[{name}] No se reportaron capabilities", file=sys.stderr)
+        return
+
+    print(f"\n{'─' * 50}", file=sys.stderr)
+    print(f" {name} — Capabilities soportadas", file=sys.stderr)
+    print(f"{'─' * 50}", file=sys.stderr)
+
+    for key in sorted(caps):
+        value = caps[key]
+        # Extraer solo los métodos/flags relevantes
+        if isinstance(value, dict):
+            sub = ", ".join(f"{k}" for k, v in value.items() if v is True or v)
+            if sub:
+                print(f"  {key}: {sub}", file=sys.stderr)
+            else:
+                print(f"  {key}: (configured)", file=sys.stderr)
+        elif isinstance(value, list):
+            print(f"  {key}: {', '.join(str(v) for v in value)}", file=sys.stderr)
+        else:
+            print(f"  {key}: {value}", file=sys.stderr)
+
+    print(f"{'─' * 50}\n", file=sys.stderr)
+
+
 class LSPClient:
     """Cliente LSP genérico sobre stdio (stdin/stdout).
 
@@ -205,6 +234,7 @@ class TyServer(LSPClient):
         })
         await self.send_notification("initialized", {})
         self._initialized = True
+        _print_capabilities("ty", resp)
         return resp
 
     async def hover(self, file_uri: str, line: int, character: int) -> dict | None:
@@ -387,6 +417,7 @@ class RuffServer(LSPClient):
         })
         await self.send_notification("initialized", {})
         self._initialized = True
+        _print_capabilities("ruff", resp)
         return resp
 
     async def format_file(self, file_uri: str) -> list[dict]:

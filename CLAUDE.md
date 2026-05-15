@@ -126,8 +126,7 @@ python-code-mcp install    → registra el servidor en Claude Code y sale
 | `src/ty_lsp/install.py` | `run_install()`, `find_claude_cli()` | Lógica de instalación (`claude mcp add`) + registro de hooks |
 | `src/ty_lsp/hooks/pre_tool_use.py` | — | Hook PreToolUse: envía POST a `/lsp/open` para calentar ty |
 | `src/ty_lsp/hooks/post_tool_use.py` | — | Hook PostToolUse: consulta `/lsp/file-info` e imprime diagnósticos y símbolos |
-| `src/ty_lsp/hooks/pre_tool_use_edit.py` | — | Hook PreToolUse Edit/Write: captura diagnósticos + workspace diagnostics en snapshot temporal |
-| `src/ty_lsp/hooks/post_tool_use_edit.py` | — | Hook PostToolUse Edit/Write: compara antes/después con remapeo de líneas + impacto cross-file + bloqueo configurable |
+| `src/ty_lsp/hooks/pre_tool_use_edit.py` | — | Hook PreToolUse Edit/Write: captura diagnósticos + workspace diagnostics, simula cambio y bloquea si hay errores nuevos |
 | `src/ty_lsp/hooks/hook_config.py` | `HookConfig` | Lectura de configuración de bloqueo desde `[tool.python-code-mcp.hooks]` en pyproject.toml |
 | `src/ty_lsp/testmod/` | — | Módulo de prueba con imports cruzados para testing LSP multi-archivo |
 
@@ -207,16 +206,15 @@ Los hooks se instalan durante `python-code-mcp install` y se integran con Claude
 
 **Hooks para Edit/Write:**
 
-3. **PreToolUse** (`pre_tool_use_edit.py`): Antes de editar/escribir un `.py`, captura diagnósticos actuales y contenido en un snapshot temporal. Si el bloqueo está activo (`block-mode != "off"`), simula el cambio (`before_content.replace(old_string, new_string)` para Edit, `content` para Write), lo envía a ty via `/lsp/check-hypothetical`, compara diagnósticos antes/después, y si hay errores nuevos que coinciden con la configuración → retorna `{"decision": "block", "reason": "..."}` para **prevenir** que el cambio se aplique. Si no hay bloqueo o no hay errores → silencioso (no imprime nada).
-4. **PostToolUse** (`post_tool_use_edit.py`): Tras editar/escribir un `.py`, recarga el archivo en ty via `/lsp/reload`, compara diagnósticos antes/después con remapeo de líneas, y muestra solo los errores NUEVOS introducidos por el cambio via `hookSpecificOutput.additionalContext` (JSON). También muestra errores resueltos y realiza análisis de impacto cross-file. Es puramente informativo — nunca bloquea.
+3. **PreToolUse** (`pre_tool_use_edit.py`): Antes de editar/escribir un `.py`, captura diagnósticos actuales (via `/lsp/check-hypothetical` con contenido actual) y contenido en un snapshot temporal. Si el bloqueo está activo (`block-mode != "off"`), simula el cambio (`before_content.replace(old_string, new_string)` para Edit, `content` para Write), lo envía a ty via `/lsp/check-hypothetical`, compara diagnósticos antes/después con remapeo de líneas, y si hay errores nuevos que coinciden con la configuración → retorna `{"decision": "block", "reason": "..."}` para **prevenir** que el cambio se aplique. Si no hay bloqueo o no hay errores → silencioso (no imprime nada).
 
 ### Remapeo de líneas (Edit)
 
-El post-hook de Edit calcula el offset de líneas para comparar diagnósticos:
-- `start_line` = línea donde empieza `old_string` en el contenido pre-edit
+El pre-hook de Edit calcula el offset de líneas para comparar diagnósticos antes/después:
+- `edit_start_line` = línea donde empieza `old_string` en el contenido actual
 - `old_count` = líneas del `old_string`
 - `delta` = `new_string.lines - old_string.lines`
-- Diagnósticos "before" con `line > start_line + old_count` se ajustan: `line += delta`
+- Diagnósticos "before" con `line > edit_start_line + old_count` se ajustan: `line += delta`
 - Para Write: no hay remapeo (archivo completamente nuevo)
 
 ### Configuración de bloqueo de Hooks
@@ -245,7 +243,7 @@ block-cross-file = true      # Incluir impacto cross-file
 3. Compara diagnósticos del contenido hipotético vs diagnósticos actuales del archivo.
 4. Filtra los errores nuevos con `HookConfig.filter_blocking()`.
 5. Si hay errores que bloquean → retorna `{"decision": "block", "reason": "..."}` y Claude **nunca aplica** el cambio.
-6. Si no hay errores que bloquean → el cambio procede normalmente, y el post-hook reporta info adicional.
+6. Si no hay errores que bloquean → el cambio procede normalmente.
 
 **Ejemplo: bloquear solo imports no resueltos y variables no usadas:**
 
@@ -261,7 +259,6 @@ Archivos instalados:
 - `.claude/hooks/python-code-mcp-pre.py` (matcher: `Read`)
 - `.claude/hooks/python-code-mcp-post.py` (matcher: `Read`)
 - `.claude/hooks/python-code-mcp-pre-edit.py` (matcher: `Edit|Write`)
-- `.claude/hooks/python-code-mcp-post-edit.py` (matcher: `Edit|Write`)
 
 ### Lifespan
 
@@ -359,8 +356,8 @@ El comando `python-code-mcp install` ejecuta:
 - **Home**: `C:\Users\alejandro.cuartas`
 - **Shell**: `C:\WINDOWS\system32\cmd.exe`
 - **Python**: `3.12.0` → `C:\Users\alejandro.cuartas\AppData\Local\Programs\Python\Python312\python.exe`
-- **Date/Time**: 2026-05-14 09:28:21 (SA Pacific Standard Time)
-- **Unix Timestamp**: `1778768901`
+- **Date/Time**: 2026-05-14 13:25:49 (SA Pacific Standard Time)
+- **Unix Timestamp**: `1778783149`
 
 
 
@@ -426,30 +423,29 @@ python-code-mcp/
 
 ### Project Stats
 
-- **Python files**: 35
+- **Python files**: 34
 - **JS/TS files**: 0
-- **Total tracked files**: 35
+- **Total tracked files**: 34
 
 ### Git Info
 
 - **Branch**: `main`
+  - 21f2557 Fix ruff diagnostics in hooks and support blocking new files with Write
   - f54e522 Add Ruff LSP integration for linting, formatting, and code actions
   - 611b65c Refactor into modular architecture and update CLAUDE.md
-  - 7029efb Add workspace-level diagnostics with cross-file impact detection
 
 ### Git Status
 
 ```
-  M .mcp.json
-   M CLAUDE.md
+  M CLAUDE.md
    M pyproject.toml
    M src/ty_lsp/app.py
    M src/ty_lsp/hooks/post_tool_use_edit.py
    M src/ty_lsp/hooks/pre_tool_use_edit.py
+   M src/ty_lsp/install.py
    M src/ty_lsp/routes.py
-   M src/ty_lsp/server.py
    M src/ty_lsp/tools_lsp.py
-  ?? src/ty_lsp/hooks/hook_config.py
+   M src/ty_lsp/tools_ruff.py
 ```
 
 ---

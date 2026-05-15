@@ -306,3 +306,69 @@ async def restart_servers(ctx: Context) -> str:
         f"  tree-sitter: índice reconstruido\n"
         f"  Configuración recargada desde pyproject.toml"
     )
+
+
+@mcp.tool()
+def set_block_mode(
+    block_mode: str | None = None,
+    block_severity: int | None = None,
+    reason: str = "",
+) -> str:
+    """Modify the hook block mode at runtime without editing pyproject.toml.
+
+    Allows temporarily adjusting block severity for scenarios like large
+    refactors or projects with pre-existing errors. Always set the highest
+    severity that allows your work to proceed. Reset to defaults when done.
+
+    Args:
+        block_mode: Block mode override. One of:
+            "off" - No blocking (use only when necessary)
+            "ty" - Block only on type checker errors
+            "ruff" - Block only on linter errors
+            "all" - Block on both type and lint errors
+            None - Reset to pyproject.toml value
+        block_severity: Minimum severity to block. One of:
+            0 - Disabled (no blocking)
+            1 - Error only
+            2 - Error + Warning
+            3 - Error + Warning + Info
+            None - Reset to pyproject.toml value
+        reason: Why you are changing the block mode (logged)
+
+    Returns:
+        Confirmation message with the effective configuration.
+    """
+    import ty_lsp.app as app
+
+    if block_mode is None and block_severity is None:
+        # Reset to defaults
+        app.block_mode_override = None
+        return "Block mode reset to pyproject.toml defaults."
+
+    # Build or update override
+    override = app.block_mode_override or {}
+    if block_mode is not None:
+        override["block_mode"] = block_mode
+    if block_severity is not None:
+        override["block_severity"] = block_severity
+    app.block_mode_override = override
+
+    # Log the change
+    print(
+        f"[python-code-mcp] Block mode changed: "
+        f"mode={override.get('block_mode')}, "
+        f"severity={override.get('block_severity')}, "
+        f"reason={reason!r}",
+        file=sys.stderr,
+    )
+
+    mode = override.get("block_mode", "(from config)")
+    sev = override.get("block_severity", "(from config)")
+    return (
+        f"Block mode updated.\n"
+        f"  block-mode: {mode}\n"
+        f"  block-severity: {sev}\n"
+        f"  reason: {reason or '(none)'}\n"
+        f"\n"
+        f"Call with no arguments to reset to pyproject.toml defaults."
+    )
