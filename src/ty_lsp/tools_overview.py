@@ -314,20 +314,18 @@ async def _section_health(
             ruff_errors = 0
             ruff_warnings = 0
 
-            # ty: use workspace_diagnostic for a single bulk call
-            ws_diags = await ty.workspace_diagnostic()
-            for diags in ws_diags.values():
-                for d in diags:
+            # Use pull model: iterate open_files and call diagnostic(uri) per file
+            for uri in app.open_files:
+                ty_diags = await ty.diagnostic(uri)
+                for d in ty_diags:
                     sev = d.get("severity", 0)
                     if sev == 1:
                         ty_errors += 1
                     elif sev == 2:
                         ty_warnings += 1
 
-            # ruff: collect push diagnostics (single bulk drain)
-            ruff_diags = await ruff.collect_push_diagnostics(timeout=2.0)
-            for diags in ruff_diags.values():
-                for d in diags:
+                ruff_diags = await ruff.diagnostic(uri)
+                for d in ruff_diags:
                     sev = d.get("severity", 0)
                     if sev == 1:
                         ruff_errors += 1
@@ -345,7 +343,6 @@ async def _section_health(
 def _section_public_api(
     depth: str,
     max_symbols: int,
-    py_files: list[Path],
     config: dict | None,
 ) -> str:
     lines: list[str] = ["## Public API", ""]
@@ -355,39 +352,47 @@ def _section_public_api(
         lines.append("  (no Python package found)")
         return "\n".join(lines)
 
-    init_files: list[Path] = []
+    # Collect module files to scan
+    module_files: list[Path] = []
     if depth == "top_level":
-        init_path = main_pkg / "__init__.py"
-        if init_path.exists():
-            init_files.append(init_path)
+        # Only files directly under the main package (no subdirs)
+        for f in main_pkg.iterdir():
+            if f.suffix == ".py" and f.name != "__init__.py":
+                module_files.append(f)
     else:  # all_packages
-        for py_file in py_files:
-            if py_file.name == "__init__.py":
-                init_files.append(py_file)
+        # All .py files under main package, including subdirectories
+        for f in main_pkg.rglob("*.py"):
+            if f.name != "__init__.py":
+                module_files.append(f)
 
-    if not init_files:
-        lines.append("  (no __init__.py files found)")
+    if not module_files:
+        lines.append("  (no module files found)")
         return "\n".join(lines)
 
+    module_files.sort()
+
     total = 0
-    for init_file in init_files:
+    for mod_file in module_files:
         try:
-            tree, _source = _parse_file(str(init_file))
+            tree, _source = _parse_file(str(mod_file))
         except OSError:
             continue
 
         symbols = _walk_symbols(tree.root_node)
-        top_level = [s for s in symbols if s.parent is None]
+        # Only top-level (parent=None), public symbols (no _ prefix)
+        top_level = [
+            s for s in symbols if s.parent is None and not s.name.startswith("_")
+        ]
 
         if not top_level:
             continue
 
-        rel = init_file.relative_to(Path.cwd())
+        rel = mod_file.relative_to(main_pkg)
         lines.append(f"  {rel}:")
 
         for sym in top_level:
             if total >= max_symbols:
-                lines.append(f"    ... ({len(top_level)} symbols total, capped at {max_symbols})")
+                lines.append(f"    ... (capped at {max_symbols})")
                 break
             kind_label = "class" if sym.kind == "class" else "def"
             lines.append(f"    {kind_label} {sym.name}")
@@ -421,8 +426,8 @@ async def project_overview(
         ctx: MCP context (auto-injected).
         include: Sections to include. None = all. Values: metadata, structure,
             entry_points, stack, tool_config, health, public_api
-        public_api_depth: "top_level" (main package __init__.py only) or
-            "all_packages" (all __init__.py files).
+        public_api_depth: "top_level" (main package modules only) or
+            "all_packages" (all modules including subpackages).
         health_mode: "cached" (in-memory data) or "fresh" (live LSP diagnostics).
         max_symbols_per_section: Max symbols per section (1-500, default 50).
     """
@@ -461,6 +466,6 @@ async def project_overview(
         parts.append(await _section_health(health_mode, ctx))
 
     if "public_api" in sections:
-        parts.append(_section_public_api(public_api_depth, max_symbols, py_files, config))
+        parts.append(_section_public_api(public_api_depth, max_symbols, config))
 
     return "\n\n".join(parts)
