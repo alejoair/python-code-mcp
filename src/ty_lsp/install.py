@@ -106,6 +106,19 @@ def _is_our_hook(entry: dict) -> bool:
     return False
 
 
+def _install_agents() -> None:
+    """Copia los agentes .md al directorio .claude/agents/ del proyecto."""
+    agents_src = Path(__file__).parent / "agents"
+    project_root = Path.cwd()
+    agents_dst = project_root / ".claude" / "agents"
+    agents_dst.mkdir(parents=True, exist_ok=True)
+
+    for agent_file in sorted(agents_src.glob("*.md")):
+        dst = agents_dst / agent_file.name
+        shutil.copy2(agent_file, dst)
+        print(f"[OK] Agente copiado: {dst}")
+
+
 def main() -> None:
     """Registra python-code-mcp como servidor MCP en Claude Code."""
     claude = find_claude_cli()
@@ -136,6 +149,7 @@ def main() -> None:
         sys.exit(result.returncode)
 
     _install_hooks()
+    _install_agents()
 
 
 def run_install() -> None:

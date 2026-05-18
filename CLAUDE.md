@@ -128,6 +128,7 @@ python-code-mcp install    → registra el servidor en Claude Code y sale
 | `src/ty_lsp/hooks/post_tool_use.py` | — | Hook PostToolUse: consulta `/lsp/file-info` e imprime diagnósticos y símbolos |
 | `src/ty_lsp/hooks/pre_tool_use_edit.py` | — | Hook PreToolUse Edit/Write: captura diagnósticos + workspace diagnostics, simula cambio y bloquea si hay errores nuevos |
 | `src/ty_lsp/hooks/hook_config.py` | `HookConfig` | Lectura de configuración de bloqueo desde `[tool.python-code-mcp.hooks]` en pyproject.toml |
+| `src/ty_lsp/agents/` | — | Definiciones de agentes Claude Code (subagentes `.md` con YAML frontmatter) |
 | `src/ty_lsp/testmod/` | — | Módulo de prueba con imports cruzados para testing LSP multi-archivo |
 
 ### Entry point (`pyproject.toml`)
@@ -260,6 +261,17 @@ Archivos instalados:
 - `.claude/hooks/python-code-mcp-post.py` (matcher: `Read`)
 - `.claude/hooks/python-code-mcp-pre-edit.py` (matcher: `Edit|Write`)
 
+### Agentes Claude Code
+
+Los agentes se instalan durante `python-code-mcp install` y se copian a `.claude/agents/`:
+
+- **`planner`** (`planner.md`): Agente especializado en analizar codebases Python y diseñar planes de implementación. Usa las tools MCP (type checking, búsqueda estructural, extracción de código) para explorar el proyecto antes de planificar. Modelo `haiku`, memoria de proyecto.
+
+Claude Code descubre automáticamente los agentes en `.claude/agents/` — no requiere configuración en `settings.json`.
+
+Archivos instalados:
+- `.claude/agents/planner.md`
+
 ### Lifespan
 
 El lifespan `ty_lifespan` (en `server.py`) ejecuta al inicio:
@@ -291,6 +303,7 @@ El comando `python-code-mcp install` ejecuta:
 2. Registra el servidor: `claude mcp add -s project -t http python-code-mcp http://127.0.0.1:8000/mcp`
 3. Copia 4 hooks a `.claude/hooks/` del proyecto (prefijo `python-code-mcp-`)
 4. Actualiza `.claude/settings.json` del proyecto con 4 entradas de hooks (2 Read + 2 Edit|Write), preservando hooks existentes
+5. Copia los agentes `.md` de `src/ty_lsp/agents/` a `.claude/agents/` del proyecto
 
 ## TreeSitterIndex — Índice estructural tree-sitter
 
@@ -382,6 +395,9 @@ python-code-mcp/
 │       └── publish.yml
 ├── src/
 │   └── ty_lsp/
+│       ├── agents/
+│       │   ├── __init__.py
+│       │   └── planner.md
 │       ├── hooks/
 │       │   ├── __init__.py
 │       │   ├── hook_config.py
