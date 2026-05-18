@@ -44,15 +44,22 @@ class PyTreeContext(_TreeContext):
         self.num_lines = len(self.lines) + 1
         self.output_lines: dict[int, str] = {}
         self.scopes: list[set[int]] = [set() for _ in range(self.num_lines)]
-        self.header: list[list[tuple[int, ...]]] = [
-            [] for _ in range(self.num_lines)  # type: ignore[list-item]
+        # walk_tree (from base class) populates header[i] with lists of
+        # (size, start, end) tuples.  After processing we replace the
+        # whole attribute with plain (start, end) tuples — matching
+        # grep-ast's own post-processing (see grep_ast.py line 83).
+        header_buf: list[list[tuple[int, ...]]] = [
+            [] for _ in range(self.num_lines)
         ]
-        self.nodes: list[list[object]] = [list() for _ in range(self.num_lines)]
+        self.header = header_buf  # type: ignore[assignment]
+        self.nodes: list[list[object]] = [[] for _ in range(self.num_lines)]
 
         self.walk_tree(tree.root_node)
 
+        # Replace header_buf with the final (start, end) format.
+        processed: list[tuple[int, int]] = []
         for i in range(self.num_lines):
-            header = sorted(self.header[i])
+            header = sorted(header_buf[i])
             if len(header) > 1:
                 size, head_start, head_end = header[0]
                 if size > self.header_max:
@@ -60,7 +67,8 @@ class PyTreeContext(_TreeContext):
             else:
                 head_start = i
                 head_end = i + 1
-            self.header[i] = [(head_start, head_end)]
+            processed.append((head_start, head_end))
+        self.header = processed  # type: ignore[assignment]
 
         self.show_lines: set[int] = set()
         self.lines_of_interest: set[int] = set()
